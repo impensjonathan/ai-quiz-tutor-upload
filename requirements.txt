@@ -1,0 +1,8 @@
+streamlit
+python-docx
+google-generativeai
+numpy
+chromadb
+PyPDF2
+python-pptx
+docling
