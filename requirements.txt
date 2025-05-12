@@ -3,7 +3,7 @@ python-docx
 google-generativeai
 numpy==1.26.4  # Pin NumPy version
 pysqlite3-binary
-chromadb==0.5.0
+chromadb==0.4.24
 PyPDF2
 python-pptx
 docling
