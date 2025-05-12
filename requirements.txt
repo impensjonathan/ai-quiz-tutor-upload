@@ -1,9 +1,9 @@
 streamlit
 python-docx
 google-generativeai
-numpy==1.26.4  # Pin NumPy version
+numpy==1.26.4
 pysqlite3-binary
-chromadb==0.4.24
+chromadb==0.4.22  # Changed to this specific older version
 PyPDF2
 python-pptx
-docling
+docling # Keep as is based on your last setup
