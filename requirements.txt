@@ -2,7 +2,9 @@ streamlit
 python-docx
 google-generativeai
 numpy
-chromadb
+pysqlite3-binary  # Explicitly add this
+chromadb==0.5.0   # Pin to a specific recent version
 PyPDF2
 python-pptx
+# docling # Add this back if you successfully installed it locally and want to try it later
 docling
