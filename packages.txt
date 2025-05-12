@@ -1,5 +1,3 @@
 build-essential
 gcc
 g++
-libsqlite3-dev
-sqlite3

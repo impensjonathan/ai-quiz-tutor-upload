@@ -1,9 +1,10 @@
 streamlit
-python-docx
+lxml==5.4.0            # From your old working app
+python-docx==0.8.11    # From your old working app
 google-generativeai
 numpy==1.26.4
 pysqlite3-binary
-chromadb==0.4.22  # Changed to this specific older version
+chromadb==0.4.22
 PyPDF2
 python-pptx
 docling # Keep as is based on your last setup
