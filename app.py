@@ -1,18 +1,19 @@
 # app.py (AI_Quiz_Tutor_Upload version)
 
-import docx
 import streamlit as st
 import re
 import time
 import google.generativeai as genai
 import random
 import numpy as np
-import chromadb
-import chromadb.utils.embedding_functions as embedding_functions
 import traceback
 import io
-import PyPDF2
-from pptx import Presentation
+import docx # Keep this, we still use it in a helper
+import PyPDF2 # Keep this
+from pptx import Presentation # Keep this
+import faiss # <<< NEW IMPORT >>>
+
+# Ensure chromadb and its embedding_functions are NOT imported
 
 # --- Configuration ---
 CORE_SUBJECT = "Insurance Principles" 
@@ -139,51 +140,107 @@ def load_clean_filter_paragraphs(uploaded_file_obj):
         return prepared_chunks
     else: print(f"--- Failed to load/parse paragraphs from {file_name}. ---"); return None
 
-# --- Vector Store Setup ---
-# (Unchanged)
+# <<< Replace your OLD setup_vector_store function with this NEW one >>>
 def setup_vector_store(substantive_chunks_list, api_key_for_ef, uploaded_filename="document"):
-    # ... (rest of function unchanged) ...
-    if not substantive_chunks_list: st.warning("VS Setup: No substantive chunks."); return None 
-    print(f"--- Setting up vector store for {len(substantive_chunks_list)} chunks from {uploaded_filename} ---")
-    try:
-        client = chromadb.Client(); print("--- ChromaDB client (in-memory) ---")
-        collection_name_for_doc = f"{CHROMA_COLLECTION_NAME}_{re.sub(r'[^a-zA-Z0-9_-]', '_', uploaded_filename)}"
-        google_ef = embedding_functions.GoogleGenerativeAiEmbeddingFunction(api_key=api_key_for_ef, model_name=EMBEDDING_MODEL, task_type="retrieval_document")
-        print(f"--- Using Google EF for ChromaDB: {EMBEDDING_MODEL} ---")
-        try: client.delete_collection(name=collection_name_for_doc); print(f"--- Deleted old collection: {collection_name_for_doc} ---")
-        except: print(f"--- Collection {collection_name_for_doc} not found or delete error (ok). ---")
-        collection = client.create_collection(name=collection_name_for_doc, embedding_function=google_ef); print(f"--- Collection '{collection_name_for_doc}' created ---")
-        chunk_ids = [f"chunk_{i}" for i in range(len(substantive_chunks_list))]
-        batch_size = 100; num_batches = (len(substantive_chunks_list) + batch_size - 1) // batch_size
-        print(f"--- Adding {len(substantive_chunks_list)} chunks to ChromaDB in {num_batches} batches... ---")
-        progress_bar_embed = st.progress(0, text="Embedding document content...")
-        for i in range(0, len(substantive_chunks_list), batch_size):
-            batch_texts = substantive_chunks_list[i:i+batch_size]; batch_ids = chunk_ids[i:i+batch_size]
-            print(f"--- Embedding Batch {i//batch_size + 1}/{num_batches} ({len(batch_texts)} chunks) ---")
-            collection.add(ids=batch_ids, documents=batch_texts)
-            print(f"--- Batch {i//batch_size + 1} added to Chroma ---")
-            current_progress = min(1.0, (i + len(batch_texts)) / len(substantive_chunks_list)) if len(substantive_chunks_list) > 0 else 1.0
-            progress_bar_embed.progress(current_progress, text=f"Embedding content... (Batch {i//batch_size+1}/{num_batches})")
-            if num_batches > 1 and (i//batch_size + 1) < num_batches : time.sleep(1)
-        progress_bar_embed.empty() 
-        final_count = collection.count(); print(f"--- Docs added. Collection now has {final_count} items. ---")
-        if final_count != len(substantive_chunks_list): print(f"--- WARNING: ChromaDB count != substantive chunks! ---")
-        return collection
-    except Exception as e: print(f"--- Error in setup_vector_store (embedding): {e} ---"); traceback.print_exc(); st.error(f"Vector store embedding error: {e}"); return None
+    """
+    Generates embeddings for the provided text chunks and builds a FAISS index.
+    Stores the FAISS index and the chunks in st.session_state.
+    """
+    if not substantive_chunks_list:
+        st.warning("FAISS Setup: No substantive chunks provided to build index.")
+        st.session_state.faiss_index = None
+        st.session_state.faiss_index_chunks = []
+        return False # Indicate failure or no index built
 
-# --- Question Generation Function ---
-# <<< Replace ONLY this function in your app.py >>>
-def generate_quiz_question(model, subject="Document Content", difficulty="average", vector_collection=None, previous_question_text=None, all_doc_chunks=None):
+    print(f"--- FAISS: Starting setup for {len(substantive_chunks_list)} chunks from {uploaded_filename} ---")
+    
+    all_embeddings_list = []
+    embedding_model_name = EMBEDDING_MODEL # Uses the global constant
+
+    # Batching for embedding generation
+    batch_size = 50 # Gemini API often has batch limits for embed_content (e.g., 100, but 50 is safer)
+    num_batches = (len(substantive_chunks_list) + batch_size - 1) // batch_size
+    
+    progress_text = "Generating embeddings for document chunks..."
+    progress_bar_embed = st.progress(0, text=progress_text)
+    print(f"--- FAISS: Generating embeddings in {num_batches} batches of size {batch_size} ---")
+
+    try:
+        for i in range(num_batches):
+            start_index = i * batch_size
+            end_index = min((i + 1) * batch_size, len(substantive_chunks_list))
+            batch_texts = substantive_chunks_list[start_index:end_index]
+            
+            if not batch_texts: continue # Should not happen if loop range is correct
+
+            print(f"--- FAISS: Embedding Batch {i+1}/{num_batches} ({len(batch_texts)} chunks) ---")
+            # Note: genai.embed_content expects a list of strings in 'content'
+            # The task_type "RETRIEVAL_DOCUMENT" is appropriate for texts to be stored/indexed.
+            response = genai.embed_content(
+                model=embedding_model_name,
+                content=batch_texts,
+                task_type="RETRIEVAL_DOCUMENT"
+            )
+            batch_embeddings = response['embedding']
+            all_embeddings_list.extend(batch_embeddings)
+            
+            progress_bar_embed.progress(float(end_index / len(substantive_chunks_list)), text=f"{progress_text} (Batch {i+1}/{num_batches})")
+            time.sleep(0.5) # Small delay to be kind to API rate limits, adjust if needed
+
+        if not all_embeddings_list or len(all_embeddings_list) != len(substantive_chunks_list):
+            st.error("FAISS Setup: Embedding generation failed or produced incorrect number of embeddings.")
+            return False
+
+        embeddings_np = np.array(all_embeddings_list).astype('float32') # FAISS expects float32 NumPy array
+        dimension = embeddings_np.shape[1]
+        print(f"--- FAISS: Embeddings generated. Shape: {embeddings_np.shape} ---")
+
+        print("--- FAISS: Building FAISS index (IndexFlatL2) ---")
+        faiss_index = faiss.IndexFlatL2(dimension) # Using L2 distance (Euclidean)
+        # For cosine similarity with normalized embeddings, IndexFlatIP would be an option:
+        # faiss.normalize_L2(embeddings_np) # Normalize if using IndexFlatIP
+        # faiss_index = faiss.IndexFlatIP(dimension)
+        
+        faiss_index.add(embeddings_np)
+        print(f"--- FAISS: Index built. Total vectors in index: {faiss_index.ntotal} ---")
+
+        st.session_state.faiss_index = faiss_index
+        st.session_state.faiss_index_chunks = substantive_chunks_list # Store the original texts paired with the index
+        st.session_state.vector_store_setup_done = True # Reuse this flag
+        progress_bar_embed.empty()
+        return True # Indicate success
+
+    except Exception as e:
+        print(f"--- Error during FAISS setup (embedding or indexing): {type(e).__name__}: {e} ---")
+        traceback.print_exc()
+        st.error(f"FAISS index creation failed: {e}")
+        st.session_state.faiss_index = None
+        st.session_state.faiss_index_chunks = []
+        progress_bar_embed.empty()
+        return False
+# <<< End of new setup_vector_store function >>>
+
+# <<< Replace your ENTIRE existing generate_quiz_question function with this one >>>
+def generate_quiz_question(model, subject="Document Content", difficulty="average", 
+                           previous_question_text=None, all_doc_chunks=None):
     print(f"--- Generating question. Difficulty requested: {difficulty}. Subject: {subject}. Prev Q: {'Yes' if previous_question_text else 'No'} ---")
     if not model: st.error("Q Gen: AI Model not configured."); return None
-    if not all_doc_chunks: st.error("Q Gen: No document chunks provided for context."); return None
+    if not all_doc_chunks: st.error("Q Gen: No document chunks provided (all_doc_chunks)."); return None
     
+    faiss_index = st.session_state.get('faiss_index')
+    faiss_index_chunks = st.session_state.get('faiss_index_chunks')
+
     context_text_list = []
     source_of_context = "" 
 
-    if not previous_question_text and all_doc_chunks: # Strategy for the FIRST question (Q1)
-        source_of_context = "Q1 - From Available Shuffled (Longest if not shuffled/empty)"
+    if not previous_question_text: 
+        source_of_context = "Q1 - From Available Shuffled (or Longest as fallback)"
         print(f"--- Context for Q1: Attempting to use 'available_chunk_indices'. ---")
+        if 'available_chunk_indices' not in st.session_state: 
+            st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
+            random.shuffle(st.session_state.available_chunk_indices)
+            print(f"--- Re-initialized and shuffled {len(st.session_state.available_chunk_indices)} available_chunk_indices for Q1 ---")
+
         if st.session_state.available_chunk_indices:
             indices_to_use = []
             for _ in range(NUM_CONTEXT_CHUNKS_TO_USE):
@@ -194,16 +251,15 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                 context_text_list = [all_doc_chunks[i] for i in indices_to_use if i < len(all_doc_chunks)]
                 print(f"--- Selected {len(context_text_list)} chunks from new area for Q1 using indices: {indices_to_use}. Remaining available: {len(st.session_state.available_chunk_indices)} ---")
         
-        if not context_text_list: # Fallback for Q1 if available_chunks was empty
-            print(f"--- Q1 Fallback: Selecting {NUM_CONTEXT_CHUNKS_TO_USE} longest chunks from {len(all_doc_chunks)}. ---")
+        if not context_text_list: 
+            print(f"--- Q1 Fallback (available_chunks empty/failed): Selecting {NUM_CONTEXT_CHUNKS_TO_USE} longest chunks from {len(all_doc_chunks)}. ---")
             if len(all_doc_chunks) == 0: st.error("No substantive chunks available for Q1 context."); return None
             sorted_chunks = sorted(all_doc_chunks, key=len, reverse=True)
             context_text_list = sorted_chunks[:NUM_CONTEXT_CHUNKS_TO_USE]
             source_of_context = "Q1 - Longest Chunks (Fallback)"
         print(f"--- Selected {len(context_text_list)} chunks for Q1 context. ---")
 
-
-    elif difficulty == "harder" and all_doc_chunks: # User answered correctly, move to a new section
+    elif difficulty == "harder": 
         source_of_context = "New Section (Correct Answer)"
         print(f"--- Context for New Section (Correct Answer): Attempting to use 'available_chunk_indices'. ---")
         if st.session_state.available_chunk_indices:
@@ -217,35 +273,41 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                 print(f"--- Selected {len(context_text_list)} chunks from new area using indices: {indices_to_use}. Remaining available: {len(st.session_state.available_chunk_indices)} ---")
         
         if not context_text_list: 
-            print("--- No more new unvisited chunks for New Section. Falling back to semantic search on prev_Q for 'harder'. ---")
-            if vector_collection and previous_question_text:
+            print("--- No more new unvisited chunks for New Section. Falling back to FAISS search on prev_Q for 'harder'. ---")
+            if faiss_index and faiss_index_chunks and previous_question_text:
                 query_text_for_vector_search = previous_question_text
                 try:
-                    results = vector_collection.query(query_texts=[query_text_for_vector_search], n_results=NUM_CHUNKS_TO_FETCH_SEMANTICALLY) # Use new constant
-                    if results and results.get('documents') and results['documents'][0]:
-                        retrieved_chunks = results['documents'][0]
-                        context_text_list = [chunk for chunk in retrieved_chunks if not is_likely_title_or_toc(chunk)][:NUM_CONTEXT_CHUNKS_TO_USE] # Use standard N chunks
-                        print(f"--- Fallback 'harder': Retrieved {len(retrieved_chunks)}, kept {len(context_text_list)} after post-filter. ---")
-                except Exception as e: print(f"--- Error in fallback VS query for 'harder': {e} ---")
-            source_of_context = "New Section Fallback (Semantic on Prev Q for Harder)"
+                    print(f"--- FAISS: Embedding query for 'harder' fallback: '{query_text_for_vector_search[:100]}...' ---")
+                    query_embedding_response = genai.embed_content(model=EMBEDDING_MODEL, content=query_text_for_vector_search, task_type="RETRIEVAL_QUERY")
+                    query_embedding = np.array(query_embedding_response['embedding']).astype('float32').reshape(1, -1)
+                    distances, faiss_indices_ret = faiss_index.search(query_embedding, k=NUM_CHUNKS_TO_FETCH_SEMANTICALLY)
+                    retrieved_chunks = [faiss_index_chunks[i] for i in faiss_indices_ret[0]]
+                    context_text_list = [chunk for chunk in retrieved_chunks if not is_likely_title_or_toc(chunk)][:NUM_CONTEXT_CHUNKS_TO_USE]
+                    print(f"--- Fallback 'harder' (FAISS): Retrieved {len(retrieved_chunks)}, kept {len(context_text_list)} after post-filter. ---")
+                except Exception as e: print(f"--- Error in fallback FAISS query for 'harder': {e} ---")
+            source_of_context = "New Section Fallback (FAISS on Prev Q for Harder)"
 
-    elif difficulty == "simpler" and previous_question_text and vector_collection: # Answered incorrectly
-        source_of_context = "Same Topic (Incorrect Answer - Semantic)"
-        query_text_for_vector_search = previous_question_text 
-        print(f"--- Querying VS for 'simpler' question using previous question: '{previous_question_text[:100]}...' ---")
-        try:
-            # <<< FIXED NameError: Use NUM_CHUNKS_TO_FETCH_SEMANTICALLY >>>
-            results = vector_collection.query(query_texts=[query_text_for_vector_search], n_results=NUM_CHUNKS_TO_FETCH_SEMANTICALLY)
-            if results and results.get('documents') and results['documents'][0]:
-                retrieved_chunks = results['documents'][0]
+    elif difficulty == "simpler" and previous_question_text: 
+        source_of_context = "Same Topic (Incorrect Answer - FAISS)"
+        if faiss_index and faiss_index_chunks:
+            query_text_for_vector_search = previous_question_text 
+            print(f"--- FAISS: Embedding query for 'simpler': '{query_text_for_vector_search[:100]}...' ---")
+            try:
+                query_embedding_response = genai.embed_content(model=EMBEDDING_MODEL, content=query_text_for_vector_search, task_type="RETRIEVAL_QUERY")
+                query_embedding = np.array(query_embedding_response['embedding']).astype('float32').reshape(1, -1)
+                distances, faiss_indices_ret = faiss_index.search(query_embedding, k=NUM_CHUNKS_TO_FETCH_SEMANTICALLY)
+                retrieved_chunks = [faiss_index_chunks[i] for i in faiss_indices_ret[0]]
                 context_text_list = [chunk for chunk in retrieved_chunks if not is_likely_title_or_toc(chunk)][:NUM_CONTEXT_CHUNKS_TO_USE] 
-                print(f"--- Retrieved {len(retrieved_chunks)} chunks, kept {len(context_text_list)} after post-filter for 'simpler'. ---")
+                print(f"--- FAISS 'simpler': Retrieved {len(retrieved_chunks)}, kept {len(context_text_list)} after post-filter. ---")
                 if not context_text_list and retrieved_chunks: context_text_list = retrieved_chunks[:NUM_CONTEXT_CHUNKS_TO_USE]
-        except Exception as e: print(f"--- Error querying VS for 'simpler': {e} ---")
+            except Exception as e: print(f"--- Error querying FAISS for 'simpler': {e} ---")
+        else:
+            print("--- FAISS index not available for 'simpler' question. Will use final random fallback. ---")
+            source_of_context += " (FAISS Index Missing)"
     
     if not context_text_list and all_doc_chunks:
         source_of_context += " + Final Random Fallback" if source_of_context else "Final Random Fallback"
-        print(f"--- Context: Final fallback to random from {len(all_doc_chunks)} substantive chunks. ---")
+        print(f"--- Context: Final fallback to random from {len(all_doc_chunks)}. ---")
         num_to_sample_random = min(NUM_CONTEXT_CHUNKS_TO_USE, len(all_doc_chunks))
         if num_to_sample_random > 0:
             potential_random_chunks = random.sample(all_doc_chunks, min(num_to_sample_random * 2, len(all_doc_chunks)))
@@ -262,15 +324,12 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     
     print(f"--- Context Source: {source_of_context} ---")
     print(f"--- FULL CONTEXT TO LLM ({len(context_to_send)} chars): ---")
-    for i_chunk, chunk_ctx in enumerate(context_text_list): 
-        print(f"CTX CHUNK {i_chunk+1} (Length: {len(chunk_ctx.split())} words):\n'{chunk_ctx}'\n---")
+    for i_chunk, chunk_ctx in enumerate(context_text_list): print(f"CTX CHUNK {i_chunk+1} (Length: {len(chunk_ctx.split())} words):\n'{chunk_ctx}'\n---")
     print("--- END OF FULL CONTEXT ---")
     
     difficulty_prompt_instruction = "Generate a question of average difficulty based on the provided context." 
-    if difficulty == "harder": 
-        difficulty_prompt_instruction = "The user answered the previous question correctly. You are now being provided context from a new, different section of the document. Generate a question of average difficulty that tests understanding of the core concepts presented in this new context. Aim to explore a different aspect or principle if the context allows."
-    elif difficulty == "simpler" and previous_question_text:
-        difficulty_prompt_instruction = "The user answered the previous question incorrectly. Generate another question of average difficulty that targets the core concept of the previous question, using straightforward language based on the provided context (which is related to the failed question) to help reinforce understanding."
+    if difficulty == "harder": difficulty_prompt_instruction = "The user answered the previous question correctly. You are now being provided context from a new, different section of the document. Generate a question of average difficulty that tests understanding of the core concepts presented in this new context. Aim to explore a different aspect or principle if the context allows."
+    elif difficulty == "simpler" and previous_question_text: difficulty_prompt_instruction = "The user answered the previous question incorrectly. Generate another question of average difficulty that targets the core concept of the previous question, using straightforward language based on the provided context (which is related to the failed question) to help reinforce understanding."
     
     prompt = f"""
     You are an expert quiz generator specializing in '{subject}'.
@@ -291,29 +350,29 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     Explanation: [Brief explanation from context.]
     Provided Text Context:\n---\n{context_to_send}\n---\nGenerate the question now.
     """ 
-    
-    # (LLM call and Parsing logic unchanged from response #157)
-    response = None; response_text = None; max_retries = 3; retry_delay = 5; llm_response_obj = None
-    for attempt in range(max_retries):
-        try:
-            print(f"--- Sending prompt to Gemini AI (Attempt {attempt + 1}/{max_retries}) ---")
-            safety_settings = { gp: gpt.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE for gp, gpt in [(genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, genai.types), (genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT, genai.types), (genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, genai.types), (genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, genai.types)] }
-            llm_response_obj = model.generate_content(prompt, safety_settings=safety_settings, request_options={'timeout': 60}) 
-            print("--- Received response from Gemini AI ---")
-            if llm_response_obj and llm_response_obj.candidates and hasattr(llm_response_obj.candidates[0].content, 'parts') and llm_response_obj.candidates[0].content.parts:
-                response_text = llm_response_obj.candidates[0].content.parts[0].text.strip()
-                if response_text: response = llm_response_obj; break 
-                else: reason = llm_response_obj.candidates[0].finish_reason.name if llm_response_obj.candidates[0].finish_reason else "Empty content part"; print(f"AI Response Text Empty (Attempt {attempt + 1}). Reason: {reason}")
-            elif llm_response_obj and not llm_response_obj.candidates: reason = llm_response_obj.prompt_feedback.block_reason.name if llm_response_obj.prompt_feedback and llm_response_obj.prompt_feedback.block_reason else "No candidates"; print(f"AI Response No Candidates (Attempt {attempt + 1}). Reason: {reason}")
-            else: print(f"AI Response Invalid/Null (Attempt {attempt + 1})")
-            if attempt < max_retries - 1: time.sleep(retry_delay); continue
-            else: st.error(f"AI response issue after {max_retries} attempts."); return None
-        except Exception as e_api: 
-            print(f"LLM API Error (Attempt {attempt + 1}/{max_retries}): {type(e_api).__name__}: {e_api}")
-            if attempt < max_retries - 1: print(f"--- Retrying in {retry_delay} seconds... ---"); time.sleep(retry_delay)
-            else: print(f"--- Max retries reached for API call. ---"); raise e_api 
-    if not response_text: st.error("Failed to get valid response text from AI after retries."); return None
+    llm_response_obj = None; response_text = None; max_retries = 3; retry_delay = 5
     try:
+        for attempt in range(max_retries):
+            try:
+                print(f"--- Sending prompt to Gemini AI (Attempt {attempt + 1}/{max_retries}) ---")
+                safety_settings = { gp: gpt.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE for gp, gpt in [(genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, genai.types), (genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT, genai.types), (genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, genai.types), (genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, genai.types)] }
+                llm_response_obj = model.generate_content(prompt, safety_settings=safety_settings, request_options={'timeout': 60}) 
+                print("--- Received response from Gemini AI ---")
+                if llm_response_obj and llm_response_obj.candidates and hasattr(llm_response_obj.candidates[0].content, 'parts') and llm_response_obj.candidates[0].content.parts:
+                    response_text = llm_response_obj.candidates[0].content.parts[0].text.strip()
+                    if response_text: break 
+                    else: reason = llm_response_obj.candidates[0].finish_reason.name if llm_response_obj.candidates[0].finish_reason else "Empty content part"; print(f"AI Response Text Empty (Attempt {attempt + 1}). Reason: {reason}")
+                elif llm_response_obj and not llm_response_obj.candidates: reason = llm_response_obj.prompt_feedback.block_reason.name if llm_response_obj.prompt_feedback and llm_response_obj.prompt_feedback.block_reason else "No candidates"; print(f"AI Response No Candidates (Attempt {attempt + 1}). Reason: {reason}")
+                else: print(f"AI Response Invalid/Null (Attempt {attempt + 1})")
+                if attempt < max_retries - 1: time.sleep(retry_delay); continue
+                else: st.error(f"AI response issue after {max_retries} attempts."); return None
+            except Exception as e_api: 
+                print(f"LLM API Error (Attempt {attempt + 1}/{max_retries}): {type(e_api).__name__}: {e_api}")
+                if attempt < max_retries - 1: print(f"--- Retrying in {retry_delay} seconds... ---"); time.sleep(retry_delay)
+                else: print(f"--- Max retries reached for API call. ---"); raise e_api 
+        if not response_text: st.error("Failed to get valid response text from AI after retries."); return None
+        
+        # Parsing Logic
         print(f"--- Raw AI Response Text ---\n{response_text}\n--- End Raw Response ---")
         parsed_data = {}; options = {}
         patterns = {
@@ -331,22 +390,42 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
             match = re.search(pattern, text, flags)
             if match: return match.group(1).strip()
             print(f"--- Parsing Warning: Could not find '{key}' ---"); return None
-        parsed_data["question"] = extract_with_pattern("Question", patterns["question"], response_text)
+        
+        # Extract question first
+        question_text_raw = extract_with_pattern("Question", patterns["question"], response_text)
+        if question_text_raw:
+            # <<< ADDED: Formatting cleanup for question text >>>
+            q_text = re.sub(r'\.(?=[a-zA-Z0-9])', '. ', question_text_raw) # Space after period if followed by char/digit
+            q_text = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', q_text) # Space between letter and number
+            q_text = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', q_text) # Space between number and letter
+            q_text = re.sub(r'\s{2,}', ' ', q_text).strip() # Normalize multiple spaces to one
+            parsed_data["question"] = q_text
+            # <<< End Formatting cleanup >>>
+        else:
+            parsed_data["question"] = None
+
         options["A"] = extract_with_pattern("Option A", patterns["A"], response_text)
         options["B"] = extract_with_pattern("Option B", patterns["B"], response_text)
         options["C"] = extract_with_pattern("Option C", patterns["C"], response_text)
         options["D"] = extract_with_pattern("Option D", patterns["D"], response_text)
         parsed_data["options"] = {k: v for k, v in options.items() if v is not None} 
+        
         correct_ans_raw = extract_with_pattern("Correct Answer", patterns["correct_answer"], response_text)
         if correct_ans_raw: parsed_data["correct_answer"] = correct_ans_raw.upper()
+        
         parsed_data["explanation"] = extract_with_pattern("Explanation", patterns["explanation"], response_text)
+        
         req_keys = ["question", "options", "correct_answer", "explanation"];
         if not all(k in parsed_data and parsed_data[k] is not None for k in req_keys) or len(parsed_data.get("options", {})) != 4:
             print(f"--- PARSING FAILED ---"); print(f"--- Parsed Data (incomplete): {parsed_data} ---") 
             raise ValueError("Parsing failed. Missing required parts or options incomplete.")
         if parsed_data["correct_answer"] not in ["A", "B", "C", "D"]: raise ValueError(f"Invalid correct answer: '{parsed_data['correct_answer']}'")
         print("--- Successfully parsed question data (using Regex) ---"); return parsed_data
-    except ValueError as ve_parsing: print(f"Parsing Error: {ve_parsing}"); st.error("AI response format issue."); traceback.print_exc(); return None
+    
+    except ValueError as ve_parsing: 
+        print(f"Parsing Error: {ve_parsing}"); 
+        st.error("AI response format issue."); 
+        traceback.print_exc(); return None
     except Exception as e_overall: 
         print(f"Overall Question Generation Error: {type(e_overall).__name__}: {e_overall}")
         safety_fb = "";
@@ -377,20 +456,20 @@ except KeyError as ke: st.error(f"{ke} - Check secrets."); st.session_state.llm_
 except Exception as e: st.error(f"AI Config Error: {e}"); st.session_state.llm_configured = False
 
 # --- Initialize Session State ---
-# <<< MODIFIED: Added available_chunk_indices and potentially used_chunk_indices >>>
 st.session_state.setdefault('uploaded_file_key', None) 
 st.session_state.setdefault('substantive_chunks_for_quiz', None) 
-st.session_state.setdefault('chroma_collection', None)
-st.session_state.setdefault('vector_store_setup_done', False)
-st.session_state.setdefault('available_chunk_indices', []) # For tracking unvisited chunks
-# st.session_state.setdefault('used_chunk_indices', set()) # Alternative tracking
+# st.session_state.setdefault('chroma_collection', None) # Removed for FAISS
+st.session_state.setdefault('vector_store_setup_done', False) # Still used
+st.session_state.setdefault('faiss_index', None) # <<< ADDED for FAISS >>>
+st.session_state.setdefault('faiss_index_chunks', []) # <<< ADDED for FAISS >>>
+st.session_state.setdefault('available_chunk_indices', []) 
 
 st.session_state.setdefault('quiz_started', False); st.session_state.setdefault('current_question_data', None)
 st.session_state.setdefault('question_number', 0); st.session_state.setdefault('user_answer', None)
 st.session_state.setdefault('feedback_message', None); st.session_state.setdefault('show_explanation', False)
 st.session_state.setdefault('last_answer_correct', None); st.session_state.setdefault('incorrectly_answered_questions', [])
 st.session_state.setdefault('total_questions_answered', 0); st.session_state.setdefault('show_summary', False)
-st.session_state.setdefault('current_doc_subject', CORE_SUBJECT) 
+st.session_state.setdefault('current_doc_subject', CORE_SUBJECT)
 
 # --- File Uploader ---
 uploaded_file = st.file_uploader(
@@ -399,36 +478,69 @@ uploaded_file = st.file_uploader(
 )
 
 # --- Document Processing Triggered by File Upload ---
+# <<< MODIFIED for FAISS >>>
 if uploaded_file is not None:
     current_file_key = f"{uploaded_file.name}_{uploaded_file.size}" 
-    if st.session_state.uploaded_file_key != current_file_key or not st.session_state.vector_store_setup_done:
-        print(f"--- File '{uploaded_file.name}' detected. Processing... ---"); st.session_state.uploaded_file_key = current_file_key
-        # Reset ALL relevant states for a new file
-        st.session_state.substantive_chunks_for_quiz = None; st.session_state.chroma_collection = None; st.session_state.vector_store_setup_done = False
-        st.session_state.quiz_started = False; st.session_state.current_question_data = None; st.session_state.question_number = 0
-        st.session_state.incorrectly_answered_questions = []; st.session_state.total_questions_answered = 0
-        st.session_state.show_summary = False; st.session_state.feedback_message = None; st.session_state.show_explanation = False
-        st.session_state.current_doc_subject = CORE_SUBJECT # Default to CORE_SUBJECT for now
-        
-        substantive_chunks = load_clean_filter_paragraphs(uploaded_file) 
-        st.session_state.substantive_chunks_for_quiz = substantive_chunks 
+    # Process if new file OR if setup wasn't completed last time (e.g., due to previous ChromaDB error)
+    if st.session_state.uploaded_file_key != current_file_key or not st.session_state.get('vector_store_setup_done', False):
+        print(f"--- New File: {uploaded_file.name}. Processing... ---"); st.session_state.uploaded_file_key = current_file_key
 
+        # Reset all relevant states for a new file or failed previous setup
+        st.session_state.substantive_chunks_for_quiz = None
+        st.session_state.vector_store_setup_done = False # Reset this flag
+        st.session_state.faiss_index = None             # Clear old FAISS index
+        st.session_state.faiss_index_chunks = []        # Clear old FAISS chunks
+        st.session_state.available_chunk_indices = []   # Clear available indices
+
+        st.session_state.quiz_started = False
+        st.session_state.current_question_data = None
+        st.session_state.question_number = 0
+        st.session_state.incorrectly_answered_questions = []
+        st.session_state.total_questions_answered = 0
+        st.session_state.show_summary = False
+        st.session_state.feedback_message = None
+        st.session_state.show_explanation = False
+        st.session_state.current_doc_subject = CORE_SUBJECT # Default to CORE_SUBJECT
+
+        # Step 1: Load and heuristically filter paragraphs (using our existing function)
+        # This function should still return a list of text strings.
+        substantive_chunks = load_clean_filter_paragraphs(uploaded_file) 
+        st.session_state.substantive_chunks_for_quiz = substantive_chunks # This is what FAISS will use
+
+        # Step 2: Setup FAISS vector store if chunks were extracted and LLM is configured
         if st.session_state.substantive_chunks_for_quiz and st.session_state.llm_configured:
-            print("--- Preparing to setup vector store for filtered chunks... ---")
-            with st.spinner("Analyzing document... Please wait."):
-                 collection = setup_vector_store( st.session_state.substantive_chunks_for_quiz, st.session_state.gemini_api_key, uploaded_file.name )
-                 if collection is not None:
-                     st.session_state.chroma_collection = collection; st.session_state.vector_store_setup_done = True
-                     print(f"--- VS setup OK for {uploaded_file.name} with {len(st.session_state.substantive_chunks_for_quiz)} chunks. ---")
-                     # <<< MODIFIED: Initialize and shuffle available_chunk_indices >>>
-                     st.session_state.available_chunk_indices = list(range(len(st.session_state.substantive_chunks_for_quiz)))
-                     random.shuffle(st.session_state.available_chunk_indices)
-                     print(f"--- Initialized and shuffled {len(st.session_state.available_chunk_indices)} available_chunk_indices ---")
-                 else: print(f"--- VS setup failed for {uploaded_file.name}. ---"); st.session_state.vector_store_setup_done = False
-        
-        if st.session_state.vector_store_setup_done: st.success(f"Doc '{uploaded_file.name}' analyzed!")
-        elif st.session_state.substantive_chunks_for_quiz: st.warning(f"Doc '{uploaded_file.name}' loaded, vector analysis failed/skipped.")
-        else: st.error(f"Could not process '{uploaded_file.name}'.")
+            print("--- Preparing to setup FAISS vector store for filtered chunks... ---")
+            with st.spinner(f"Analyzing '{uploaded_file.name}' with FAISS... This may take a moment."):
+                # The new setup_vector_store directly sets session state vars
+                # and returns True on success, False on failure.
+                setup_success = setup_vector_store(
+                    st.session_state.substantive_chunks_for_quiz, 
+                    st.session_state.gemini_api_key, 
+                    uploaded_file.name
+                )
+                st.session_state.vector_store_setup_done = setup_success # Update based on return
+
+                if setup_success:
+                    # Initialize available_chunk_indices for the new quiz logic
+                    if st.session_state.faiss_index_chunks: # Should be same as substantive_chunks_for_quiz
+                        st.session_state.available_chunk_indices = list(range(len(st.session_state.faiss_index_chunks)))
+                        random.shuffle(st.session_state.available_chunk_indices)
+                        print(f"--- FAISS: Initialized and shuffled {len(st.session_state.available_chunk_indices)} available_chunk_indices ---")
+                    else:
+                         st.session_state.available_chunk_indices = [] # Should not happen if setup_success
+                         print(f"--- FAISS Warning: No faiss_index_chunks after successful setup? available_chunk_indices empty. ---")
+                    print(f"--- FAISS VS setup OK for {uploaded_file.name} with {len(st.session_state.substantive_chunks_for_quiz)} chunks. ---")
+                else:
+                    print(f"--- FAISS VS setup failed for {uploaded_file.name}. ---")
+
+        # Display status after processing attempt
+        if st.session_state.vector_store_setup_done:
+            st.success(f"Doc '{uploaded_file.name}' analyzed with FAISS and ready!")
+        elif st.session_state.substantive_chunks_for_quiz: # Chunks loaded but FAISS failed
+            st.warning(f"Doc '{uploaded_file.name}' processed, but FAISS index creation failed. Quiz might use basic context.")
+        else: # No chunks loaded at all
+            st.error(f"Could not process '{uploaded_file.name}'. Check file or try another.")
+# <<< End of MODIFIED if uploaded_file is not None: block >>>
 
 # --- App Logic ---
 # (Summary report is unchanged)
@@ -453,18 +565,39 @@ if st.session_state.show_summary:
         st.rerun()
 
 # Condition 1: Ready to Start Quiz
-# (Unchanged)
 elif st.session_state.substantive_chunks_for_quiz is not None and st.session_state.llm_configured and not st.session_state.quiz_started and uploaded_file is not None:
     st.info(f"Ready to test your knowledge on the uploaded document: '{uploaded_file.name}' (Topic: {st.session_state.current_doc_subject})")
-    if not st.session_state.get('vector_store_setup_done', False): st.warning("Note: Advanced context analysis failed. Quiz will use basic random context selection.")
+    if not st.session_state.get('vector_store_setup_done', False): 
+        st.warning("Note: FAISS index setup may have failed. Quiz will use basic random context selection if so.")
+
     if st.button("Start Quiz!", type="primary"):
-        print(f"--- Start Quiz Clicked for: {uploaded_file.name} ---"); st.session_state.quiz_started = True; st.session_state.question_number = 1; st.session_state.feedback_message = None; st.session_state.show_explanation = False; st.session_state.last_answer_correct = None; st.session_state.user_answer = None; st.session_state.current_question_data = None; st.session_state.incorrectly_answered_questions = []; st.session_state.total_questions_answered = 0
+        print(f"--- Start Quiz Clicked for: {uploaded_file.name} ---")
+        st.session_state.quiz_started = True
+        st.session_state.question_number = 1
+        st.session_state.feedback_message = None
+        st.session_state.show_explanation = False
+        st.session_state.last_answer_correct = None
+        st.session_state.user_answer = None
+        st.session_state.current_question_data = None
+        st.session_state.incorrectly_answered_questions = []
+        st.session_state.total_questions_answered = 0
+
         doc_subject = st.session_state.current_doc_subject 
         with st.spinner("Generating first question..."):
-             q_data = generate_quiz_question(model=st.session_state.gemini_model, subject=doc_subject, difficulty="average", vector_collection=st.session_state.chroma_collection, all_doc_chunks=st.session_state.substantive_chunks_for_quiz)
-        st.session_state.current_question_data = q_data
-        if st.session_state.current_question_data is None: st.error("Failed to generate Q1."); st.session_state.quiz_started = False; st.session_state.question_number = 0
-        else: st.rerun()
+            q_data = generate_quiz_question(
+                model=st.session_state.gemini_model, 
+                subject=doc_subject, 
+                difficulty="average", 
+                all_doc_chunks=st.session_state.substantive_chunks_for_quiz
+                # previous_question_text is implicitly None for Q1
+            ) # Ensure this parenthesis closes the call on its own line or correctly
+        st.session_state.current_question_data = q_data # This must be on a new line
+        if st.session_state.current_question_data is None: 
+            st.error("Failed to generate Q1.")
+            st.session_state.quiz_started = False
+            st.session_state.question_number = 0
+        else: 
+            st.rerun()
 
 # Condition 2: Quiz in Progress
 elif st.session_state.quiz_started and uploaded_file is not None :
@@ -496,23 +629,41 @@ elif st.session_state.quiz_started and uploaded_file is not None :
                      elif st.session_state.last_answer_correct is False: st.error(st.session_state.feedback_message)
                      else: st.warning(st.session_state.feedback_message)
                      if st.session_state.show_explanation: st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
-                     if st.button("Next Question"):
-                         # <<< MODIFIED: Spinner text & difficulty based on new logic >>>
-                         spinner_message = ""
-                         difficulty_for_next_q = ""
-                         if st.session_state.last_answer_correct:
-                             spinner_message = "Finding a new section and generating question..."
-                             difficulty_for_next_q = "harder" # Internal signal to fetch new area context
-                         else:
-                             spinner_message = "Generating simpler question on this topic..."
-                             difficulty_for_next_q = "simpler"
-                         print(f"--- Next Q Clicked --- Type: {difficulty_for_next_q} ---")
-                         # <<< End Modification >>>
-                         st.session_state.feedback_message = None; st.session_state.show_explanation = False; st.session_state.user_answer = None; st.session_state.last_answer_correct = None
-                         with st.spinner(spinner_message):
-                              next_q = generate_quiz_question(model=st.session_state.gemini_model, subject=doc_subject, difficulty=difficulty_for_next_q, vector_collection=st.session_state.chroma_collection, previous_question_text=q_data['question'], all_doc_chunks=st.session_state.substantive_chunks_for_quiz)
-                         if next_q: st.session_state.current_question_data = next_q; st.session_state.question_number += 1; print(f"New Q generated. Q{st.session_state.question_number}"); st.rerun()
-                         else: st.error(f"Failed to generate {difficulty_for_next_q} q."); st.stop()
+# Inside "Condition 2: Quiz in Progress", find and replace this entire "Next Question" button block:
+                 if st.button("Next Question"):
+                     spinner_message = ""
+                     difficulty_for_next_q = ""
+                     if st.session_state.last_answer_correct:
+                         spinner_message = "Moving to a new section..."
+                         difficulty_for_next_q = "harder" # Signal to get new area context
+                     else: # Incorrect answer
+                         spinner_message = "Revisiting this topic..."
+                         difficulty_for_next_q = "simpler" # Signal to use semantic search on previous Q
+
+                     print(f"--- Next Q Clicked --- User was {st.session_state.last_answer_correct}. Requesting type: {difficulty_for_next_q} ---")
+
+                     st.session_state.feedback_message = None
+                     st.session_state.show_explanation = False
+                     st.session_state.user_answer = None
+                     st.session_state.last_answer_correct = None
+                     with st.spinner(spinner_message):
+                          next_q = generate_quiz_question(
+                              model=st.session_state.gemini_model, 
+                              subject=doc_subject, 
+                              difficulty=difficulty_for_next_q, 
+                              previous_question_text=q_data['question'], 
+                              all_doc_chunks=st.session_state.substantive_chunks_for_quiz
+                          ) # Ensure this parenthesis closes the call correctly
+
+                     # The 'if next_q:' MUST start on a new line, correctly indented
+                     if next_q: 
+                         st.session_state.current_question_data = next_q
+                         st.session_state.question_number += 1
+                         print(f"New Q generated. Q{st.session_state.question_number}")
+                         st.rerun()
+                     else: 
+                         st.error(f"Failed to generate next question (type: {difficulty_for_next_q}). Please try again or stop quiz.")
+                         # No st.stop() here, allow user to click again or stop
             st.divider()
             if st.button("Stop Quiz"): print("--- Stop Clicked ---"); st.session_state.show_summary = True; st.session_state.quiz_started = False; st.rerun()
         else:
