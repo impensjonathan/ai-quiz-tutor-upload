@@ -220,40 +220,130 @@ def setup_vector_store(substantive_chunks_list, api_key_for_ef, uploaded_filenam
         return False
 # <<< End of new setup_vector_store function >>>
 
+# <<< ADD THIS NEW FUNCTION TO YOUR app.py >>>
+
+# <<< Replace your ENTIRE existing determine_document_theme function with this one >>>
+def determine_document_theme(sampled_chunks, llm_model):
+    """
+    Uses the LLM to determine the core subject and primary learning objective
+    from a sample of document chunks.
+    """
+    if not sampled_chunks:
+        print("--- Theme Determination: No chunks provided to determine theme. ---")
+        return CORE_SUBJECT, "To understand general concepts from the document." # Fallback
+
+    print(f"--- Theme Determination: Analyzing {len(sampled_chunks)} sampled chunks. ---")
+    
+    combined_sample_text = ""
+    char_limit_for_theme_prompt = 6000 
+    
+    for chunk in sampled_chunks:
+        if len(combined_sample_text) + len(chunk) + 4 < char_limit_for_theme_prompt: 
+            combined_sample_text += chunk + "\n---\n"
+        else:
+            break 
+    
+    if not combined_sample_text: 
+        print("--- Theme Determination: Combined sample text is empty. Using fallback. ---")
+        return CORE_SUBJECT, "To learn about the provided content."
+
+    print(f"--- Theme Determination: Sending combined sample (approx {len(combined_sample_text)} chars) to LLM. ---")
+
+    prompt = f"""
+    Analyze the following text excerpts from a document. Your goal is to identify its main theme.
+    1.  Identify the primary core subject of this document. Be concise and specific (e.g., "Principles of Marine Insurance," "Risk Management in Software Projects," "Introduction to Astrophysics"). Aim for 3-7 words.
+    2.  Identify the primary learning objective or purpose of this document from a reader's perspective (e.g., "To understand key components of reinsurance treaties," "To learn how to apply agile methodologies," "To explain the life cycle of stars"). Start with "To..."
+
+    Text Excerpts:
+    ---
+    {combined_sample_text}
+    ---
+
+    Provide your answer in the following exact format, with each item on a new line:
+    Core Subject: [Identified core subject here]
+    Primary Objective: [Identified primary objective here]
+    """
+
+    try:
+        # Assuming llm_model is your configured Gemini model instance
+        response = llm_model.generate_content(prompt, request_options={'timeout': 90}) 
+        
+        if response and response.text:
+            response_text = response.text.strip()
+            print(f"--- Theme Determination LLM Raw Response: ---\n{response_text}\n----------------------------------------")
+            
+            core_subject_match = re.search(r"Core Subject:\s*(.+)", response_text, re.IGNORECASE)
+            primary_objective_match = re.search(r"Primary Objective:\s*(To .+)", response_text, re.IGNORECASE) 
+            
+            determined_subject = core_subject_match.group(1).strip() if core_subject_match else None
+            determined_objective = primary_objective_match.group(1).strip() if primary_objective_match else None
+            
+            if determined_subject and determined_objective:
+                print(f"--- Theme Determined: Subject='{determined_subject}', Objective='{determined_objective}' ---")
+                return determined_subject, determined_objective
+            else:
+                print(f"--- Theme Determination: Could not parse subject/objective from LLM response. Core Subject Match: {core_subject_match}, Objective Match: {primary_objective_match} ---")
+                subject_fallback = CORE_SUBJECT 
+                objective_fallback = "To learn about the content of the uploaded document."
+                if determined_subject: 
+                    subject_fallback = determined_subject
+                    objective_fallback = f"To understand key aspects of {determined_subject}."
+                return subject_fallback, objective_fallback
+        else:
+            print("--- Theme Determination: LLM response was empty or invalid. ---")
+            return CORE_SUBJECT, "To learn about the content of the uploaded document."
+
+    except Exception as e:
+        print(f"--- Error during theme determination LLM call: {type(e).__name__}: {e} ---")
+        traceback.print_exc()
+        return CORE_SUBJECT, "To analyze the provided document." 
+# <<< End of new determine_document_theme function >>>
+
 # <<< Replace your ENTIRE existing generate_quiz_question function with this one >>>
 def generate_quiz_question(model, subject="Document Content", difficulty="average", 
                            previous_question_text=None, all_doc_chunks=None):
-    print(f"--- Generating question. Difficulty requested: {difficulty}. Subject: {subject}. Prev Q: {'Yes' if previous_question_text else 'No'} ---")
+    print(f"--- Generating question. Difficulty requested: {difficulty}. Subject: '{subject}'. Prev Q: {'Yes' if previous_question_text else 'No'} ---")
     if not model: st.error("Q Gen: AI Model not configured."); return None
     if not all_doc_chunks: st.error("Q Gen: No document chunks provided (all_doc_chunks)."); return None
     
     faiss_index = st.session_state.get('faiss_index')
-    faiss_index_chunks = st.session_state.get('faiss_index_chunks')
+    faiss_index_chunks = st.session_state.get('faiss_index_chunks') 
+
+    # Get the dynamically determined objective, with a fallback
+    doc_objective = st.session_state.get('dynamic_doc_objective', "To help the reader understand the provided text.")
+    if not doc_objective: # Ensure it's not None or empty
+        doc_objective = "To help the reader understand the provided text."
+    print(f"--- Using Document Objective for Prompt: '{doc_objective}' ---")
 
     context_text_list = []
     source_of_context = "" 
 
+    # --- Context Selection Logic (unchanged from response #161) ---
     if not previous_question_text: 
-        source_of_context = "Q1 - From Available Shuffled (or Longest as fallback)"
+        source_of_context = "Q1 - From Available Shuffled"
         print(f"--- Context for Q1: Attempting to use 'available_chunk_indices'. ---")
-        if 'available_chunk_indices' not in st.session_state: 
-            st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
-            random.shuffle(st.session_state.available_chunk_indices)
-            print(f"--- Re-initialized and shuffled {len(st.session_state.available_chunk_indices)} available_chunk_indices for Q1 ---")
-
-        if st.session_state.available_chunk_indices:
+        if 'available_chunk_indices' not in st.session_state or not st.session_state.available_chunk_indices:
+            if len(all_doc_chunks) > 0: # Check if all_doc_chunks is not empty
+                st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
+                random.shuffle(st.session_state.available_chunk_indices)
+                print(f"--- Re-initialized and shuffled {len(st.session_state.available_chunk_indices)} available_chunk_indices for Q1 ---")
+            else:
+                st.error("No substantive chunks to select from for Q1.")
+                return None
+        
+        if st.session_state.available_chunk_indices: # Check again after potential re-initialization
             indices_to_use = []
             for _ in range(NUM_CONTEXT_CHUNKS_TO_USE):
                 if st.session_state.available_chunk_indices:
                     indices_to_use.append(st.session_state.available_chunk_indices.pop(0)) 
                 else: break
             if indices_to_use:
-                context_text_list = [all_doc_chunks[i] for i in indices_to_use if i < len(all_doc_chunks)]
+                context_text_list = [all_doc_chunks[i] for i in indices_to_use if 0 <= i < len(all_doc_chunks)]
                 print(f"--- Selected {len(context_text_list)} chunks from new area for Q1 using indices: {indices_to_use}. Remaining available: {len(st.session_state.available_chunk_indices)} ---")
         
         if not context_text_list: 
             print(f"--- Q1 Fallback (available_chunks empty/failed): Selecting {NUM_CONTEXT_CHUNKS_TO_USE} longest chunks from {len(all_doc_chunks)}. ---")
-            if len(all_doc_chunks) == 0: st.error("No substantive chunks available for Q1 context."); return None
+            if len(all_doc_chunks) == 0: st.error("No substantive chunks available for Q1 context fallback."); return None
             sorted_chunks = sorted(all_doc_chunks, key=len, reverse=True)
             context_text_list = sorted_chunks[:NUM_CONTEXT_CHUNKS_TO_USE]
             source_of_context = "Q1 - Longest Chunks (Fallback)"
@@ -269,7 +359,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                     indices_to_use.append(st.session_state.available_chunk_indices.pop(0)) 
                 else: break
             if indices_to_use:
-                context_text_list = [all_doc_chunks[i] for i in indices_to_use if i < len(all_doc_chunks)]
+                context_text_list = [all_doc_chunks[i] for i in indices_to_use if 0 <= i < len(all_doc_chunks)]
                 print(f"--- Selected {len(context_text_list)} chunks from new area using indices: {indices_to_use}. Remaining available: {len(st.session_state.available_chunk_indices)} ---")
         
         if not context_text_list: 
@@ -307,7 +397,8 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     
     if not context_text_list and all_doc_chunks:
         source_of_context += " + Final Random Fallback" if source_of_context else "Final Random Fallback"
-        print(f"--- Context: Final fallback to random from {len(all_doc_chunks)}. ---")
+        # ... (rest of fallback logic unchanged)
+        print(f"--- Context: Final fallback to random from {len(all_doc_chunks)} substantive chunks. ---")
         num_to_sample_random = min(NUM_CONTEXT_CHUNKS_TO_USE, len(all_doc_chunks))
         if num_to_sample_random > 0:
             potential_random_chunks = random.sample(all_doc_chunks, min(num_to_sample_random * 2, len(all_doc_chunks)))
@@ -327,16 +418,20 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     for i_chunk, chunk_ctx in enumerate(context_text_list): print(f"CTX CHUNK {i_chunk+1} (Length: {len(chunk_ctx.split())} words):\n'{chunk_ctx}'\n---")
     print("--- END OF FULL CONTEXT ---")
     
-    difficulty_prompt_instruction = "Generate a question of average difficulty based on the provided context." 
-    if difficulty == "harder": difficulty_prompt_instruction = "The user answered the previous question correctly. You are now being provided context from a new, different section of the document. Generate a question of average difficulty that tests understanding of the core concepts presented in this new context. Aim to explore a different aspect or principle if the context allows."
-    elif difficulty == "simpler" and previous_question_text: difficulty_prompt_instruction = "The user answered the previous question incorrectly. Generate another question of average difficulty that targets the core concept of the previous question, using straightforward language based on the provided context (which is related to the failed question) to help reinforce understanding."
+    # <<< MODIFIED: Prompt now uses dynamic subject and objective >>>
+    difficulty_prompt_instruction = f"Generate a question of average difficulty based on the provided context. The document's primary objective is: '{doc_objective}'." 
+    if difficulty == "harder": 
+        difficulty_prompt_instruction = f"The user answered the previous question correctly. You are now being provided context from a new, different section of the document. The document's primary objective is: '{doc_objective}'. Generate a question of average difficulty that tests understanding of the core concepts presented in this new context. Aim to explore a different aspect or principle if the context allows."
+    elif difficulty == "simpler" and previous_question_text:
+        difficulty_prompt_instruction = f"The user answered the previous question incorrectly. The document's primary objective is: '{doc_objective}'. Generate another question of average difficulty that targets the core concept of the previous question, using straightforward language based on the provided context (which is related to the failed question) to help reinforce understanding."
     
     prompt = f"""
-    You are an expert quiz generator specializing in '{subject}'.
+    You are an expert quiz generator. The subject of the document is '{subject}'.
     {difficulty_prompt_instruction}
+
     Guidelines:
-    1. The question must test understanding of '{subject}' principles directly covered in the 'Provided Text Context'.
-    2. NO METADATA QUESTIONS (e.g., about section numbers, document structure, "based on the text", "according to the document"). Focus strictly on the substance of insurance principles.
+    1. The question must test understanding of principles related to '{subject}' and the document's objective, directly covered in the 'Provided Text Context'.
+    2. NO METADATA QUESTIONS (e.g., about section numbers, document structure, "based on the text", "according to the document"). Focus strictly on the substance of the subject matter.
     3. Generate 4 plausible options (A, B, C, D).
     4. Ensure exactly ONE option is unambiguously correct according to the 'Provided Text Context'.
     5. Incorrect options must be relevant but clearly wrong based *only* on the 'Provided Text Context'.
@@ -348,8 +443,14 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     D: [Option D text]
     Correct Answer: [Letter ONLY, e.g., C]
     Explanation: [Brief explanation from context.]
-    Provided Text Context:\n---\n{context_to_send}\n---\nGenerate the question now.
+
+    Provided Text Context:
+    ---
+    {context_to_send}
+    ---
+    Generate the question now.
     """ 
+    # (LLM call and Regex Parsing logic - unchanged from response #167)
     llm_response_obj = None; response_text = None; max_retries = 3; retry_delay = 5
     try:
         for attempt in range(max_retries):
@@ -372,7 +473,6 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                 else: print(f"--- Max retries reached for API call. ---"); raise e_api 
         if not response_text: st.error("Failed to get valid response text from AI after retries."); return None
         
-        # Parsing Logic
         print(f"--- Raw AI Response Text ---\n{response_text}\n--- End Raw Response ---")
         parsed_data = {}; options = {}
         patterns = {
@@ -388,31 +488,25 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
             flags = re.IGNORECASE;
             if key == "explanation": flags |= re.DOTALL
             match = re.search(pattern, text, flags)
-            if match: return match.group(1).strip()
+            if match: 
+                # For question text cleanup (from response #161)
+                content = match.group(1).strip()
+                if key == "question":
+                    content = re.sub(r'\.(?=[a-zA-Z0-9])', '. ', content) 
+                    content = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', content) 
+                    content = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', content) 
+                    content = re.sub(r'\s{2,}', ' ', content).strip()
+                return content
             print(f"--- Parsing Warning: Could not find '{key}' ---"); return None
         
-        # Extract question first
-        question_text_raw = extract_with_pattern("Question", patterns["question"], response_text)
-        if question_text_raw:
-            # <<< ADDED: Formatting cleanup for question text >>>
-            q_text = re.sub(r'\.(?=[a-zA-Z0-9])', '. ', question_text_raw) # Space after period if followed by char/digit
-            q_text = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', q_text) # Space between letter and number
-            q_text = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', q_text) # Space between number and letter
-            q_text = re.sub(r'\s{2,}', ' ', q_text).strip() # Normalize multiple spaces to one
-            parsed_data["question"] = q_text
-            # <<< End Formatting cleanup >>>
-        else:
-            parsed_data["question"] = None
-
+        parsed_data["question"] = extract_with_pattern("Question", patterns["question"], response_text)
         options["A"] = extract_with_pattern("Option A", patterns["A"], response_text)
         options["B"] = extract_with_pattern("Option B", patterns["B"], response_text)
         options["C"] = extract_with_pattern("Option C", patterns["C"], response_text)
         options["D"] = extract_with_pattern("Option D", patterns["D"], response_text)
         parsed_data["options"] = {k: v for k, v in options.items() if v is not None} 
-        
         correct_ans_raw = extract_with_pattern("Correct Answer", patterns["correct_answer"], response_text)
         if correct_ans_raw: parsed_data["correct_answer"] = correct_ans_raw.upper()
-        
         parsed_data["explanation"] = extract_with_pattern("Explanation", patterns["explanation"], response_text)
         
         req_keys = ["question", "options", "correct_answer", "explanation"];
@@ -471,6 +565,16 @@ st.session_state.setdefault('last_answer_correct', None); st.session_state.setde
 st.session_state.setdefault('total_questions_answered', 0); st.session_state.setdefault('show_summary', False)
 st.session_state.setdefault('current_doc_subject', CORE_SUBJECT)
 
+# --- Initialize Session State ---
+# ... (other st.session_state.setdefault lines) ...
+st.session_state.setdefault('available_chunk_indices', []) 
+# <<< ADD THESE LINES for dynamic theme >>>
+st.session_state.setdefault('dynamic_doc_subject', None)
+st.session_state.setdefault('dynamic_doc_objective', None)
+# <<< END ADDITION >>>
+st.session_state.setdefault('quiz_started', False); 
+# ... (rest of session state inits) ...
+
 # --- File Uploader ---
 uploaded_file = st.file_uploader(
     "Upload your document (DOCX, PDF, PPTX, or TXT)",
@@ -478,19 +582,20 @@ uploaded_file = st.file_uploader(
 )
 
 # --- Document Processing Triggered by File Upload ---
-# <<< MODIFIED for FAISS >>>
+# Find this entire block in your app.py and replace it with the version below
 if uploaded_file is not None:
     current_file_key = f"{uploaded_file.name}_{uploaded_file.size}" 
-    # Process if new file OR if setup wasn't completed last time (e.g., due to previous ChromaDB error)
     if st.session_state.uploaded_file_key != current_file_key or not st.session_state.get('vector_store_setup_done', False):
         print(f"--- New File: {uploaded_file.name}. Processing... ---"); st.session_state.uploaded_file_key = current_file_key
-
+        
         # Reset all relevant states for a new file or failed previous setup
         st.session_state.substantive_chunks_for_quiz = None
-        st.session_state.vector_store_setup_done = False # Reset this flag
-        st.session_state.faiss_index = None             # Clear old FAISS index
-        st.session_state.faiss_index_chunks = []        # Clear old FAISS chunks
-        st.session_state.available_chunk_indices = []   # Clear available indices
+        st.session_state.vector_store_setup_done = False 
+        st.session_state.faiss_index = None          
+        st.session_state.faiss_index_chunks = []     
+        st.session_state.available_chunk_indices = [] 
+        st.session_state.dynamic_doc_subject = None  # Reset dynamic theme
+        st.session_state.dynamic_doc_objective = None # Reset dynamic theme
 
         st.session_state.quiz_started = False
         st.session_state.current_question_data = None
@@ -500,47 +605,81 @@ if uploaded_file is not None:
         st.session_state.show_summary = False
         st.session_state.feedback_message = None
         st.session_state.show_explanation = False
-        st.session_state.current_doc_subject = CORE_SUBJECT # Default to CORE_SUBJECT
-
-        # Step 1: Load and heuristically filter paragraphs (using our existing function)
-        # This function should still return a list of text strings.
+        # st.session_state.current_doc_subject will be set after theme determination or fallback
+        
         substantive_chunks = load_clean_filter_paragraphs(uploaded_file) 
-        st.session_state.substantive_chunks_for_quiz = substantive_chunks # This is what FAISS will use
+        st.session_state.substantive_chunks_for_quiz = substantive_chunks 
 
-        # Step 2: Setup FAISS vector store if chunks were extracted and LLM is configured
+        # Determine document theme
+        if st.session_state.substantive_chunks_for_quiz:
+            with st.spinner("Determining document theme..."):
+                num_chunks = len(st.session_state.substantive_chunks_for_quiz)
+                sampled_indices = []
+                if num_chunks > 0: sampled_indices.extend(list(range(min(2, num_chunks)))) 
+                if num_chunks > 5: sampled_indices.extend([num_chunks // 3, min(num_chunks // 3 + 1, num_chunks - 1)])
+                if num_chunks > 8: sampled_indices.extend([min(num_chunks * 2 // 3, num_chunks - 1), min(num_chunks * 2 // 3 + 1, num_chunks - 1)])
+                if num_chunks > 3: sampled_indices.extend(list(range(max(0, num_chunks - 2), num_chunks))) 
+                
+                unique_valid_indices = sorted(list(set(i for i in sampled_indices if 0 <= i < num_chunks)))
+                final_sample_indices = unique_valid_indices[:8] 
+                
+                sampled_chunks_for_theme = [st.session_state.substantive_chunks_for_quiz[i] for i in final_sample_indices]
+
+                if sampled_chunks_for_theme:
+                    subject, objective = determine_document_theme(sampled_chunks_for_theme, st.session_state.gemini_model)
+                    st.session_state.dynamic_doc_subject = subject
+                    st.session_state.dynamic_doc_objective = objective
+                    print(f"--- Dynamically Determined Subject: {subject} ---")
+                    print(f"--- Dynamically Determined Objective: {objective} ---")
+                else:
+                    print("--- Not enough chunks for smart sampling to determine theme. Using default. ---")
+                    st.session_state.dynamic_doc_subject = CORE_SUBJECT # Fallback
+                    st.session_state.dynamic_doc_objective = "To understand the content of the document." # Fallback
+
+        # Set current_doc_subject based on dynamic determination or fallbacks
+        if st.session_state.get('dynamic_doc_subject'):
+            st.session_state.current_doc_subject = st.session_state.dynamic_doc_subject
+        elif uploaded_file: 
+            st.session_state.current_doc_subject = uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ')
+            print(f"--- Using filename as subject: {st.session_state.current_doc_subject} ---")
+            if not st.session_state.get('dynamic_doc_objective'): # If objective also not set
+                 st.session_state.dynamic_doc_objective = f"To learn about {st.session_state.current_doc_subject}."
+        else: 
+            st.session_state.current_doc_subject = CORE_SUBJECT
+            if not st.session_state.get('dynamic_doc_objective'): # If objective also not set
+                 st.session_state.dynamic_doc_objective = "To understand general concepts."
+        
+        # Setup FAISS vector store if chunks were extracted and LLM is configured
         if st.session_state.substantive_chunks_for_quiz and st.session_state.llm_configured:
             print("--- Preparing to setup FAISS vector store for filtered chunks... ---")
             with st.spinner(f"Analyzing '{uploaded_file.name}' with FAISS... This may take a moment."):
-                # The new setup_vector_store directly sets session state vars
-                # and returns True on success, False on failure.
                 setup_success = setup_vector_store(
                     st.session_state.substantive_chunks_for_quiz, 
                     st.session_state.gemini_api_key, 
                     uploaded_file.name
                 )
-                st.session_state.vector_store_setup_done = setup_success # Update based on return
+                st.session_state.vector_store_setup_done = setup_success 
 
                 if setup_success:
-                    # Initialize available_chunk_indices for the new quiz logic
-                    if st.session_state.faiss_index_chunks: # Should be same as substantive_chunks_for_quiz
+                    if st.session_state.faiss_index_chunks: 
                         st.session_state.available_chunk_indices = list(range(len(st.session_state.faiss_index_chunks)))
                         random.shuffle(st.session_state.available_chunk_indices)
                         print(f"--- FAISS: Initialized and shuffled {len(st.session_state.available_chunk_indices)} available_chunk_indices ---")
                     else:
-                         st.session_state.available_chunk_indices = [] # Should not happen if setup_success
+                         st.session_state.available_chunk_indices = [] 
                          print(f"--- FAISS Warning: No faiss_index_chunks after successful setup? available_chunk_indices empty. ---")
                     print(f"--- FAISS VS setup OK for {uploaded_file.name} with {len(st.session_state.substantive_chunks_for_quiz)} chunks. ---")
                 else:
                     print(f"--- FAISS VS setup failed for {uploaded_file.name}. ---")
-
+        
         # Display status after processing attempt
-        if st.session_state.vector_store_setup_done:
-            st.success(f"Doc '{uploaded_file.name}' analyzed with FAISS and ready!")
-        elif st.session_state.substantive_chunks_for_quiz: # Chunks loaded but FAISS failed
+        if st.session_state.vector_store_setup_done: # This is the line (or similar) that was erroring
+            st.success(f"Doc '{uploaded_file.name}' (Subject: '{st.session_state.current_doc_subject}') analyzed with FAISS and ready!")
+        elif st.session_state.substantive_chunks_for_quiz: 
             st.warning(f"Doc '{uploaded_file.name}' processed, but FAISS index creation failed. Quiz might use basic context.")
-        else: # No chunks loaded at all
+        else: 
             st.error(f"Could not process '{uploaded_file.name}'. Check file or try another.")
-# <<< End of MODIFIED if uploaded_file is not None: block >>>
+# <<< End of the "if uploaded_file is not None:" block replacement >>>
 
 # --- App Logic ---
 # (Summary report is unchanged)
