@@ -31,6 +31,6 @@ env.bak/
 venv.bak/
 
 .streamlit/secrets.toml
-
+py311_env/
 # macOS files
 .DS_Store
