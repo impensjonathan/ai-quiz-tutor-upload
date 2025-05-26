@@ -30,8 +30,7 @@ ENV/
 env.bak/
 venv.bak/
 
-# Streamlit secrets folder
-.streamlit/
+.streamlit/secrets.toml
 
 # macOS files
 .DS_Store
