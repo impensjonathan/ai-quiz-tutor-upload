@@ -788,6 +788,7 @@ if not st.session_state.get('show_summary', False) and \
         "Upload your document ",
         type=["docx", "pdf", "pptx", "txt"], key="file_uploader"
     )
+    st.caption("Upload of pdf files using a Mac with an Apple M-series chip (M1/M2/M3) does not work")
     if uploaded_file_widget_result is not None:
         st.session_state.uploaded_file_object_ref = uploaded_file_widget_result 
         uploaded_file = uploaded_file_widget_result
@@ -1328,5 +1329,3 @@ else:
             st.markdown("Data Privacy", help=data_privacy_explanation)
         else:
             pass
-# This is a comment to trigger a new build on Streamlit Cloud    
-# This is a comment to trigger a new build on Streamlit Cloud    
