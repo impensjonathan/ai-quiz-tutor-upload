@@ -911,7 +911,8 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
 
 # --- App Logic (Conditions for displaying quiz UI, summary, etc.) ---
 
-if st.session_state.get('in_heatmap_quiz_mode', False) and uploaded_file is not None:
+# FIX: Changed 'uploaded_file is not None' to 'st.session_state.get('substantive_chunks_for_quiz')'
+if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get('substantive_chunks_for_quiz'):
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
         
@@ -1169,11 +1170,11 @@ elif st.session_state.get('show_summary', False):
         st.session_state.current_question_context_indices = []
         st.rerun()
 
+# FIX: Removed 'uploaded_file is not None' to rely strictly on chunks being ready
 elif st.session_state.get('vector_store_setup_done') and \
      st.session_state.get('substantive_chunks_for_quiz') and \
      st.session_state.llm_configured and \
-     not st.session_state.get('quiz_started', False) and \
-     uploaded_file is not None:
+     not st.session_state.get('quiz_started', False):
     # st.info("Document Analyzed and ready to test your knowledge") # Original info message
     st.markdown("#### Document Analyzed and ready to test your knowledge") # Using markdown for potentially bolder look
     if st.session_state.current_doc_subject:
@@ -1222,7 +1223,8 @@ elif st.session_state.get('vector_store_setup_done') and \
             st.session_state.quiz_started = False 
             st.session_state.question_number = 0
 
-elif st.session_state.get('quiz_started', False) and uploaded_file is not None :
+# FIX: Changed 'uploaded_file is not None' to 'st.session_state.get('substantive_chunks_for_quiz')'
+elif st.session_state.get('quiz_started', False) and st.session_state.get('substantive_chunks_for_quiz'):
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
 
