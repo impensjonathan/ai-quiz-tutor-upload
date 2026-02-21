@@ -152,7 +152,6 @@ def process_document_with_docling(uploaded_file_object, filename):
     if uploaded_file_object is None:
         st.error("Docling Processing: No file object received.")
         return None
-    # st.write("--- Starting Document Processing with Docling ---") # Removed as per user request
     print(f"--- Docling Processing: Starting for file: {filename} ---")
     final_content_chunks = []
     start_time = time.time()
@@ -911,7 +910,7 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
 
 # --- App Logic (Conditions for displaying quiz UI, summary, etc.) ---
 
-# FIX: Changed 'uploaded_file is not None' to 'st.session_state.get('substantive_chunks_for_quiz')'
+# FIXED LINE: We now check for substantive_chunks_for_quiz instead of uploaded_file
 if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get('substantive_chunks_for_quiz'):
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
@@ -1170,7 +1169,7 @@ elif st.session_state.get('show_summary', False):
         st.session_state.current_question_context_indices = []
         st.rerun()
 
-# FIX: Removed 'uploaded_file is not None' to rely strictly on chunks being ready
+# FIXED LINE: Removed uploaded_file requirement, using substantive_chunks_for_quiz
 elif st.session_state.get('vector_store_setup_done') and \
      st.session_state.get('substantive_chunks_for_quiz') and \
      st.session_state.llm_configured and \
@@ -1223,7 +1222,7 @@ elif st.session_state.get('vector_store_setup_done') and \
             st.session_state.quiz_started = False 
             st.session_state.question_number = 0
 
-# FIX: Changed 'uploaded_file is not None' to 'st.session_state.get('substantive_chunks_for_quiz')'
+# FIXED LINE: We now check for substantive_chunks_for_quiz instead of uploaded_file
 elif st.session_state.get('quiz_started', False) and st.session_state.get('substantive_chunks_for_quiz'):
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
