@@ -725,7 +725,7 @@ try:
         print(f"--- Terminal DEBUG: Configuring with API key ending: ...{st.session_state.gemini_api_key[-4:] if st.session_state.gemini_api_key and len(st.session_state.gemini_api_key) >=4 else 'KEY_IS_SHORT_EMPTY_OR_NONE'} ---")
         genai.configure(api_key=st.session_state.gemini_api_key)
         print("--- Terminal DEBUG: genai.configure called. ---")
-        st.session_state.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+        st.session_state.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
         print("--- Terminal DEBUG: GenerativeModel created. ---")
         st.session_state.llm_configured = True
         print("--- Terminal DEBUG: Gemini AI Configured successfully. ---")
