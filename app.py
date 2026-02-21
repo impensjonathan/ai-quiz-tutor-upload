@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Detailed LLM Error Logging)
+# app.py (AI_Quiz_Tutor_Upload version - Callback Navigation & Model Update)
 
 import streamlit as st
 
@@ -908,10 +908,38 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
        st.session_state.get('substantive_chunks_for_quiz') is not None :
         st.warning(f"Doc '{uploaded_file.name}' processed, but vector store setup might have failed. Quiz may use basic context.")
 
+# --- NAVIGATION CALLBACKS (Crucial for preventing app resets) ---
+def _back_to_summary_cb():
+    st.session_state.in_heatmap_quiz_mode = False
+    st.session_state.heatmap_quiz_source_chunk_idx = None
+    st.session_state.current_question_data = None
+    st.session_state.show_summary = True
+    st.session_state.heatmap_quiz_last_answer_incorrect = False
+
+def _retry_topic_cb():
+    st.session_state.current_question_data = None 
+    st.session_state.show_explanation = False
+    st.session_state.feedback_message = None
+
+def _stop_normal_quiz_cb():
+    st.session_state.show_summary = True
+    st.session_state.quiz_started = False
+    st.session_state.in_heatmap_quiz_mode = False 
+    st.session_state.heatmap_quiz_source_chunk_idx = None
+    st.session_state.show_heatmap_chunk_detail = False 
+    st.session_state.selected_heatmap_chunk_index = None  
+
+
 # --- App Logic (Conditions for displaying quiz UI, summary, etc.) ---
 
-# FIXED LINE: We now check for substantive_chunks_for_quiz instead of uploaded_file
-if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get('substantive_chunks_for_quiz'):
+if st.session_state.get('in_heatmap_quiz_mode', False):
+    
+    # Failsafe in case memory clears
+    if not st.session_state.get('substantive_chunks_for_quiz'):
+         st.error("Document data was cleared from memory. Please refresh and re-upload.")
+         st.session_state.in_heatmap_quiz_mode = False
+         st.stop()
+
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
         
@@ -1024,30 +1052,15 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
                     else: st.error(st.session_state.feedback_message)
                 st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
 
+                # FIXED: Callbacks used here instead of st.rerun() directly in if statements
                 if st.session_state.last_answer_correct:
-                    if st.button("Back to Quiz Summary", key="hm_q_correct_to_summary_btn"):
-                        st.session_state.in_heatmap_quiz_mode = False
-                        st.session_state.heatmap_quiz_source_chunk_idx = None
-                        st.session_state.current_question_data = None
-                        st.session_state.show_summary = True
-                        st.session_state.heatmap_quiz_last_answer_incorrect = False
-                        st.rerun()
+                    st.button("Back to Quiz Summary", key="hm_q_correct_to_summary_btn", on_click=_back_to_summary_cb)
                 else: 
                     if st.session_state.last_answer_correct is False : 
-                        if st.button("Try Another Question on this Topic", key="hm_q_retry_topic_btn"):
-                            st.session_state.current_question_data = None 
-                            st.session_state.show_explanation = False
-                            st.session_state.feedback_message = None
-                            st.rerun()
+                        st.button("Try Another Question on this Topic", key="hm_q_retry_topic_btn", on_click=_retry_topic_cb)
             
             st.divider()
-            if st.button("End Focused Quiz & View Summary", key="hm_q_stop_summary_btn"):
-                st.session_state.in_heatmap_quiz_mode = False
-                st.session_state.heatmap_quiz_source_chunk_idx = None
-                st.session_state.current_question_data = None 
-                st.session_state.show_summary = True
-                st.session_state.heatmap_quiz_last_answer_incorrect = False
-                st.rerun()
+            st.button("End Focused Quiz & View Summary", key="hm_q_stop_summary_btn", on_click=_back_to_summary_cb)
 
 elif st.session_state.get('show_summary', False):
     _summary_scroll_anchor = st.empty() # Attempt to influence scroll
@@ -1125,30 +1138,35 @@ elif st.session_state.get('show_summary', False):
                         first_text_segment_in_expander = False
                 st.markdown(content_html, unsafe_allow_html=True)
                 
+                # FIXED: Callbacks used here instead of nested st.rerun calls
+                def _start_focused_quiz_cb(idx):
+                    st.session_state.in_heatmap_quiz_mode = True
+                    st.session_state.heatmap_quiz_source_chunk_idx = idx
+                    st.session_state.current_question_data = None 
+                    st.session_state.quiz_started = False 
+                    st.session_state.show_summary = False 
+                    st.session_state.show_heatmap_chunk_detail = False
+
+                def _close_detail_cb():
+                    st.session_state.show_heatmap_chunk_detail = False
+                    st.session_state.selected_heatmap_chunk_index = None
+
                 col1_exp, col2_exp = st.columns(2)
                 with col1_exp:
-                    if st.button("Quiz me on this chunk", key=f"quiz_me_btn_summary_{selected_idx}"): 
-                        st.session_state.in_heatmap_quiz_mode = True
-                        st.session_state.heatmap_quiz_source_chunk_idx = selected_idx
-                        st.session_state.current_question_data = None 
-                        st.session_state.quiz_started = False 
-                        st.session_state.show_summary = False 
-                        st.session_state.show_heatmap_chunk_detail = False 
-                        st.rerun()
+                    st.button("Quiz me on this chunk", key=f"quiz_me_btn_summary_{selected_idx}", on_click=_start_focused_quiz_cb, args=(selected_idx,))
                 with col2_exp:
-                    if st.button("Close Detail", key=f"close_detail_exp_summary_{selected_idx}"): 
-                        st.session_state.show_heatmap_chunk_detail = False
-                        st.session_state.selected_heatmap_chunk_index = None
-                        st.rerun()
+                    st.button("Close Detail", key=f"close_detail_exp_summary_{selected_idx}", on_click=_close_detail_cb)
         else: 
             st.session_state.show_heatmap_chunk_detail = False
             st.session_state.selected_heatmap_chunk_index = None
     
-    with st.expander("📘 Document Coverage & Performance Heatmap"): # Removed expanded=False
+    with st.expander("📘 Document Coverage & Performance Heatmap"): 
         display_heatmap_grid() 
     
     st.divider()
-    if st.button("Start New Quiz Once More", key="start_new_quiz_summary"):
+
+    # FIXED: Restart uses callback
+    def _restart_full_quiz_cb():
         st.session_state.quiz_started = False
         st.session_state.question_number = 0 
         st.session_state.current_question_data = None
@@ -1167,15 +1185,15 @@ elif st.session_state.get('show_summary', False):
             random.shuffle(st.session_state.available_chunk_indices)
             st.session_state.chunk_review_status = [0] * num_chunks
         st.session_state.current_question_context_indices = []
-        st.rerun()
 
-# FIXED LINE: Removed uploaded_file requirement, using substantive_chunks_for_quiz
+    st.button("Start New Quiz Once More", key="start_new_quiz_summary", on_click=_restart_full_quiz_cb)
+
 elif st.session_state.get('vector_store_setup_done') and \
      st.session_state.get('substantive_chunks_for_quiz') and \
      st.session_state.llm_configured and \
      not st.session_state.get('quiz_started', False):
-    # st.info("Document Analyzed and ready to test your knowledge") # Original info message
-    st.markdown("#### Document Analyzed and ready to test your knowledge") # Using markdown for potentially bolder look
+    
+    st.markdown("#### Document Analyzed and ready to test your knowledge") 
     if st.session_state.current_doc_subject:
         st.markdown(f"**Subject:** {st.session_state.current_doc_subject}")
     if st.session_state.dynamic_doc_objective: 
@@ -1222,7 +1240,6 @@ elif st.session_state.get('vector_store_setup_done') and \
             st.session_state.quiz_started = False 
             st.session_state.question_number = 0
 
-# FIXED LINE: We now check for substantive_chunks_for_quiz instead of uploaded_file
 elif st.session_state.get('quiz_started', False) and st.session_state.get('substantive_chunks_for_quiz'):
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
@@ -1297,21 +1314,14 @@ elif st.session_state.get('quiz_started', False) and st.session_state.get('subst
                     st.rerun()
                 else: st.error(f"Failed to generate next question (type: {difficulty_for_next_q}). Please try again or stop quiz.")
             st.divider()
-            if st.button("Stop Quiz"): 
-                st.session_state.show_summary = True; st.session_state.quiz_started = False; 
-                st.session_state.in_heatmap_quiz_mode = False 
-                st.session_state.heatmap_quiz_source_chunk_idx = None
-                st.session_state.show_heatmap_chunk_detail = False 
-                st.session_state.selected_heatmap_chunk_index = None  
-                st.rerun()
+            # FIXED: Uses callback
+            st.button("Stop Quiz", on_click=_stop_normal_quiz_cb)
         else:
             st.error("Quiz active, but no question data. Error? Stop/restart.")
-            if st.button("Stop Quiz (Error State)"): 
-                st.session_state.quiz_started = False; st.session_state.show_summary = True; st.rerun()
+            st.button("Stop Quiz (Error State)", on_click=_stop_normal_quiz_cb)
 
 else: 
     if uploaded_file is None and st.session_state.llm_configured :
-        # CHANGE 1: Data Privacy text and tooltip
         data_privacy_explanation = "To provide quiz features, this application processes your uploaded document. Snippets of your document are sent to Google's Generative AI services to generate relevant content. Google's API policies state that this data is not used to train their general models. No original documents are stored by this application after your session ends."
         st.markdown("Data Privacy", help=data_privacy_explanation)
     elif not st.session_state.llm_configured:
