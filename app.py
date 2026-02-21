@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Callback Navigation & Model Update)
+# app.py (AI_Quiz_Tutor_Upload version - Final Navigation Fix)
 
 import streamlit as st
 
@@ -909,6 +909,18 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
         st.warning(f"Doc '{uploaded_file.name}' processed, but vector store setup might have failed. Quiz may use basic context.")
 
 # --- NAVIGATION CALLBACKS (Crucial for preventing app resets) ---
+def _start_focused_quiz_cb(idx):
+    st.session_state.in_heatmap_quiz_mode = True
+    st.session_state.heatmap_quiz_source_chunk_idx = idx
+    st.session_state.current_question_data = None 
+    st.session_state.quiz_started = False 
+    st.session_state.show_summary = False 
+    st.session_state.show_heatmap_chunk_detail = False
+
+def _close_detail_cb():
+    st.session_state.show_heatmap_chunk_detail = False
+    st.session_state.selected_heatmap_chunk_index = None
+
 def _back_to_summary_cb():
     st.session_state.in_heatmap_quiz_mode = False
     st.session_state.heatmap_quiz_source_chunk_idx = None
@@ -929,17 +941,31 @@ def _stop_normal_quiz_cb():
     st.session_state.show_heatmap_chunk_detail = False 
     st.session_state.selected_heatmap_chunk_index = None  
 
+def _restart_full_quiz_cb():
+    st.session_state.quiz_started = False
+    st.session_state.question_number = 0 
+    st.session_state.current_question_data = None
+    st.session_state.user_answer = None
+    st.session_state.feedback_message = None
+    st.session_state.show_explanation = False
+    st.session_state.last_answer_correct = None
+    st.session_state.incorrectly_answered_questions = []
+    st.session_state.total_questions_answered = 0
+    st.session_state.show_summary = False
+    st.session_state.in_heatmap_quiz_mode = False 
+    st.session_state.heatmap_quiz_source_chunk_idx = None
+    if st.session_state.get('substantive_chunks_for_quiz'):
+        num_chunks = len(st.session_state.substantive_chunks_for_quiz)
+        st.session_state.available_chunk_indices = list(range(num_chunks))
+        random.shuffle(st.session_state.available_chunk_indices)
+        st.session_state.chunk_review_status = [0] * num_chunks
+    st.session_state.current_question_context_indices = []
 
 # --- App Logic (Conditions for displaying quiz UI, summary, etc.) ---
 
-if st.session_state.get('in_heatmap_quiz_mode', False):
+# FIX: CHECK FOR CHUNKS INSTEAD OF FILE OBJECT
+if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get('substantive_chunks_for_quiz'):
     
-    # Failsafe in case memory clears
-    if not st.session_state.get('substantive_chunks_for_quiz'):
-         st.error("Document data was cleared from memory. Please refresh and re-upload.")
-         st.session_state.in_heatmap_quiz_mode = False
-         st.stop()
-
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
         
@@ -1052,7 +1078,6 @@ if st.session_state.get('in_heatmap_quiz_mode', False):
                     else: st.error(st.session_state.feedback_message)
                 st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
 
-                # FIXED: Callbacks used here instead of st.rerun() directly in if statements
                 if st.session_state.last_answer_correct:
                     st.button("Back to Quiz Summary", key="hm_q_correct_to_summary_btn", on_click=_back_to_summary_cb)
                 else: 
@@ -1138,19 +1163,6 @@ elif st.session_state.get('show_summary', False):
                         first_text_segment_in_expander = False
                 st.markdown(content_html, unsafe_allow_html=True)
                 
-                # FIXED: Callbacks used here instead of nested st.rerun calls
-                def _start_focused_quiz_cb(idx):
-                    st.session_state.in_heatmap_quiz_mode = True
-                    st.session_state.heatmap_quiz_source_chunk_idx = idx
-                    st.session_state.current_question_data = None 
-                    st.session_state.quiz_started = False 
-                    st.session_state.show_summary = False 
-                    st.session_state.show_heatmap_chunk_detail = False
-
-                def _close_detail_cb():
-                    st.session_state.show_heatmap_chunk_detail = False
-                    st.session_state.selected_heatmap_chunk_index = None
-
                 col1_exp, col2_exp = st.columns(2)
                 with col1_exp:
                     st.button("Quiz me on this chunk", key=f"quiz_me_btn_summary_{selected_idx}", on_click=_start_focused_quiz_cb, args=(selected_idx,))
@@ -1165,29 +1177,9 @@ elif st.session_state.get('show_summary', False):
     
     st.divider()
 
-    # FIXED: Restart uses callback
-    def _restart_full_quiz_cb():
-        st.session_state.quiz_started = False
-        st.session_state.question_number = 0 
-        st.session_state.current_question_data = None
-        st.session_state.user_answer = None
-        st.session_state.feedback_message = None
-        st.session_state.show_explanation = False
-        st.session_state.last_answer_correct = None
-        st.session_state.incorrectly_answered_questions = []
-        st.session_state.total_questions_answered = 0
-        st.session_state.show_summary = False
-        st.session_state.in_heatmap_quiz_mode = False 
-        st.session_state.heatmap_quiz_source_chunk_idx = None
-        if st.session_state.get('substantive_chunks_for_quiz'):
-            num_chunks = len(st.session_state.substantive_chunks_for_quiz)
-            st.session_state.available_chunk_indices = list(range(num_chunks))
-            random.shuffle(st.session_state.available_chunk_indices)
-            st.session_state.chunk_review_status = [0] * num_chunks
-        st.session_state.current_question_context_indices = []
-
     st.button("Start New Quiz Once More", key="start_new_quiz_summary", on_click=_restart_full_quiz_cb)
 
+# FIX: CHECK FOR CHUNKS INSTEAD OF FILE OBJECT
 elif st.session_state.get('vector_store_setup_done') and \
      st.session_state.get('substantive_chunks_for_quiz') and \
      st.session_state.llm_configured and \
@@ -1240,6 +1232,7 @@ elif st.session_state.get('vector_store_setup_done') and \
             st.session_state.quiz_started = False 
             st.session_state.question_number = 0
 
+# FIX: CHECK FOR CHUNKS INSTEAD OF FILE OBJECT
 elif st.session_state.get('quiz_started', False) and st.session_state.get('substantive_chunks_for_quiz'):
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
@@ -1314,7 +1307,6 @@ elif st.session_state.get('quiz_started', False) and st.session_state.get('subst
                     st.rerun()
                 else: st.error(f"Failed to generate next question (type: {difficulty_for_next_q}). Please try again or stop quiz.")
             st.divider()
-            # FIXED: Uses callback
             st.button("Stop Quiz", on_click=_stop_normal_quiz_cb)
         else:
             st.error("Quiz active, but no question data. Error? Stop/restart.")
