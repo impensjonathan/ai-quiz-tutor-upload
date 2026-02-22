@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Surgically Patched Original Code)
+# app.py
 
 import streamlit as st
 
@@ -24,24 +24,23 @@ try:
     from docling.document_converter import DocumentConverter
     from docling.datamodel.base_models import DocumentStream
     from docling.chunking import HybridChunker
-    from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer # For Docling
+    from docling_core.transforms.chunker.tokenizer.huggingface import HuggingFaceTokenizer 
     from transformers import AutoTokenizer 
 except ImportError as e_import:
     st.error(f"CRITICAL IMPORT ERROR occurred: {e_import}")
     st.warning("This likely means 'docling', 'docling-core', or 'transformers' is not installed correctly in your Python environment.")
-    st.info("Please stop Streamlit, activate your 'py311_env', ensure correct installation of docling and its dependencies, then restart Streamlit.")
     st.stop() 
 except Exception as e_generic_import:
-    st.error(f"UNEXPECTED ERROR during crucial imports: {e_generic_import} ([Errno {e_generic_import.errno if hasattr(e_generic_import, 'errno') else 'N/A'}] {e_generic_import})")
+    st.error(f"UNEXPECTED ERROR during crucial imports: {e_generic_import}")
     st.stop()
 
 # --- Configuration ---
 CORE_SUBJECT = "Insurance Principles" 
 EMBEDDING_MODEL = "models/text-embedding-004"
 CHROMA_COLLECTION_NAME = "uploaded_doc_chunks" 
-NUM_CONTEXT_CHUNKS_TO_USE = 3      # Base number of chunks for final context
+NUM_CONTEXT_CHUNKS_TO_USE = 3      
 MIN_WORDS_FOR_CONTENT_CHUNK = 4 
-NUM_CHUNKS_TO_FETCH_SEMANTICALLY = 5 # How many to initially FETCH for semantic search (for simpler or harder-fallback)
+NUM_CHUNKS_TO_FETCH_SEMANTICALLY = 5 
 
 # --- Function Definitions ---
 def setup_vector_store(substantive_chunks_list, api_key_for_ef, uploaded_filename="document"):
@@ -113,8 +112,8 @@ def determine_document_theme(sampled_chunks, llm_model):
     print(f"--- Theme Determination: Sending combined sample (approx {len(combined_sample_text)} chars) to LLM. ---")
     prompt = f"""
     Analyze the following text excerpts from a document. Your goal is to identify its main theme.
-    1.  Identify the primary core subject of this document. Be concise and specific (e.g., "Principles of Marine Insurance," "Risk Management in Software Projects," "Introduction to Astrophysics"). Aim for 3-7 words.
-    2.  Identify the primary learning objective or purpose of this document from a reader's perspective (e.g., "To understand key components of reinsurance treaties," "To learn how to apply agile methodologies," "To explain the life cycle of stars"). Start with "To..."
+    1.  Identify the primary core subject of this document. Be concise and specific. Aim for 3-7 words.
+    2.  Identify the primary learning objective or purpose of this document from a reader's perspective. Start with "To..."
     Text Excerpts:\n---\n{combined_sample_text}\n---\n
     Provide your answer in the following exact format, with each item on a new line:
     Core Subject: [Identified core subject here]
@@ -133,7 +132,7 @@ def determine_document_theme(sampled_chunks, llm_model):
                 print(f"--- Theme Determined: Subject='{determined_subject}', Objective='{determined_objective}' ---")
                 return determined_subject, determined_objective
             else:
-                print(f"--- Theme Determination: Could not parse subject/objective from LLM response. Core Subject Match: {core_subject_match}, Objective Match: {primary_objective_match} ---")
+                print(f"--- Theme Determination: Could not parse subject/objective from LLM response. ---")
                 subject_fallback = CORE_SUBJECT 
                 objective_fallback = "To learn about the content of the uploaded document."
                 if determined_subject: 
@@ -167,10 +166,8 @@ def process_document_with_docling(uploaded_file_object, filename):
         docling_doc_obj = convert_result.document
         if not docling_doc_obj:
             st.error("Docling Processing: Failed to convert document.")
-            print("--- Docling: Document conversion returned None. ---")
             return None
-        print(f"--- Docling: Document converted. Initial text elements found by converter: {len(docling_doc_obj.texts if hasattr(docling_doc_obj, 'texts') else 'N/A')} ---")
-        print("--- Docling: Configuring Tokenizer for HybridChunker... ---")
+        print(f"--- Docling: Configuring Tokenizer for HybridChunker... ---")
         EMBED_MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2" 
         MAX_TOKENS_PER_CHUNK = 150
         hf_tokenizer_instance = AutoTokenizer.from_pretrained(EMBED_MODEL_ID)
@@ -178,13 +175,9 @@ def process_document_with_docling(uploaded_file_object, filename):
             tokenizer=hf_tokenizer_instance,
             max_tokens=MAX_TOKENS_PER_CHUNK
         )
-        print(f"--- Docling: Initializing HybridChunker with max_tokens={MAX_TOKENS_PER_CHUNK}, merge_peers=False ---")
         chunker = HybridChunker(tokenizer=docling_tokenizer, merge_peers=False)
-        print("--- Docling: Starting HybridChunker process... ---")
         docling_chunk_iterator = chunker.chunk(docling_doc_obj)
         all_docling_chunks_from_hybridchunker = list(docling_chunk_iterator) 
-        original_hybridchunker_count = len(all_docling_chunks_from_hybridchunker)
-        print(f"--- Docling: HybridChunker produced {original_hybridchunker_count} initial chunks. Filtering... ---")
         for i, chunk_obj in enumerate(all_docling_chunks_from_hybridchunker):
             text = chunk_obj.text.strip() if hasattr(chunk_obj, 'text') else ""
             meta = chunk_obj.meta if hasattr(chunk_obj, 'meta') else None
@@ -197,9 +190,6 @@ def process_document_with_docling(uploaded_file_object, filename):
                     "headings": headings,
                     "original_docling_chunk_index": i
                 })
-        final_content_chunk_count = len(final_content_chunks)
-        processing_time = time.time() - start_time
-        print(f"--- Docling Processing: Original HybridChunker chunks: {original_hybridchunker_count}. Final substantive chunks: {final_content_chunk_count}. Time: {processing_time:.2f}s. ---")
         if not final_content_chunks:
             st.warning("Docling processed the document, but no substantive chunks with headings were extracted after filtering.")
             return None
@@ -207,83 +197,8 @@ def process_document_with_docling(uploaded_file_object, filename):
     except Exception as e:
         processing_time = time.time() - start_time
         st.error(f"Docling Processing Error after {processing_time:.2f}s: {e}")
-        print(f"--- Docling Processing Error: {type(e).__name__}: {e} ---")
         traceback.print_exc()
         return None
-
-def generate_chunk_labels(chunks_list, llm_model, prompt_batch_size=5, inter_batch_delay_seconds=4):
-    if not chunks_list: 
-        print("--- Chunk Labeling: No chunks provided. ---")
-        return [""] * len(chunks_list) 
-    print(f"--- Chunk Labeling: Starting label generation for {len(chunks_list)} chunks in batches of {prompt_batch_size}. Delay: {inter_batch_delay_seconds}s ---")
-    all_labels = []
-    num_total_chunks = len(chunks_list)
-    num_batches = (num_total_chunks + prompt_batch_size - 1) // prompt_batch_size
-    progress_text = "Generating descriptive labels for document sections..."
-    label_progress_bar = st.progress(0, text=f"{progress_text} (Batch 0/{num_batches})")
-    for i in range(num_batches):
-        batch_start_index = i * prompt_batch_size
-        batch_end_index = min((i + 1) * prompt_batch_size, num_total_chunks)
-        current_batch_chunks_texts = chunks_list[batch_start_index:batch_end_index]
-        if not current_batch_chunks_texts: continue
-        print(f"--- Chunk Labeling: Preparing Batch {i+1}/{num_batches} ({len(current_batch_chunks_texts)} chunks) for LLM ---")
-        prompt_for_batch = "For each of the following numbered paragraphs, provide a very concise topic label (ideally 2-4 words) that best describes its main content. Each label should be suitable for a heatmap display. Focus on the most specific subject matter of each paragraph. Avoid generic phrases like 'paragraph content' or 'text excerpt'.\n\n"
-        for idx_in_batch, chunk_text in enumerate(current_batch_chunks_texts):
-            max_label_chunk_chars = 750 
-            truncated_chunk_text = chunk_text[:max_label_chunk_chars]
-            if len(chunk_text) > max_label_chunk_chars:
-                truncated_chunk_text += "..."
-            prompt_for_batch += f"Paragraph {idx_in_batch + 1}:\n---\n{truncated_chunk_text}\n---\n\n"
-        prompt_for_batch += f"Output the labels in this exact format, each on a new line, numbered starting from 1 (e.g., '1: Label for Paragraph 1', '2: Label for Paragraph 2', etc. up to '{len(current_batch_chunks_texts)}:' ):"
-        batch_generated_labels = []
-        try:
-            print(f"--- Chunk Labeling: Sending Batch {i+1} to LLM ---")
-            for attempt in range(2): 
-                label_response = llm_model.generate_content(prompt_for_batch, request_options={'timeout': 90}) 
-                if label_response and label_response.text:
-                    raw_labels_text = label_response.text.strip()
-                    print(f"--- Chunk Labeling: Batch {i+1} Raw LLM Response ---\n{raw_labels_text}\n--------------------")
-                    temp_labels_for_batch = {} 
-                    for line in raw_labels_text.splitlines():
-                        match = re.match(r"^\s*(\d+)\s*[:\-]\s*(.+)", line)
-                        if match:
-                            label_num = int(match.group(1))
-                            label_text = match.group(2).strip().replace("\"", "").replace("'", "")
-                            label_text = " ".join(label_text.split())[:50] 
-                            if label_text: temp_labels_for_batch[label_num] = label_text
-                    processed_all_in_batch = True
-                    for k_idx in range(len(current_batch_chunks_texts)):
-                        if (k_idx + 1) not in temp_labels_for_batch:
-                            processed_all_in_batch = False; break
-                    if processed_all_in_batch:
-                        for k_idx in range(len(current_batch_chunks_texts)):
-                            batch_generated_labels.append(temp_labels_for_batch[k_idx+1])
-                        print(f"--- Chunk Labeling: Successfully labeled batch {i+1} with {len(batch_generated_labels)} labels. ---")
-                        break 
-                    else: 
-                        print(f"--- Chunk Labeling: Warning - Batch {i+1} parsing failed or label count mismatch. Expected {len(current_batch_chunks_texts)}, got {len(temp_labels_for_batch)}. Retrying batch if possible. ---")
-                        batch_generated_labels = [] 
-                if attempt < 1: 
-                    print(f"--- Chunk Labeling: Retrying batch {i+1} in {inter_batch_delay_seconds * 2}s ... ---")
-                    time.sleep(inter_batch_delay_seconds * 2) 
-                else: 
-                    print(f"--- Chunk Labeling: Max retries for batch {i+1} reached. Using default labels for this batch. ---")
-        except Exception as e_label_batch:
-            print(f"--- Chunk Labeling: Error generating labels for batch {i+1}: {e_label_batch} ---")
-        if len(batch_generated_labels) != len(current_batch_chunks_texts):
-            batch_generated_labels = [f"Chunk {batch_start_index + k + 1}" for k in range(len(current_batch_chunks_texts))]
-            print(f"--- Chunk Labeling: Using default labels for batch {i+1}. ---")
-        all_labels.extend(batch_generated_labels)
-        label_progress_bar.progress(float((i + 1) / num_batches), text=f"{progress_text} (Batch {i+1}/{num_batches} processed)")
-        if i < num_batches - 1: 
-            print(f"--- Chunk Labeling: Waiting {inter_batch_delay_seconds}s before next batch... ---")
-            time.sleep(inter_batch_delay_seconds)
-    label_progress_bar.empty()
-    print(f"--- Chunk Labeling: Finished. Generated {len(all_labels)} labels. ---")
-    if len(all_labels) != num_total_chunks:
-        print(f"--- Chunk Labeling: CRITICAL - Final label count mismatch. Expected {num_total_chunks}, got {len(all_labels)}. Padding with defaults. ---")
-        all_labels.extend([f"Chunk {len(all_labels) + k + 1}" for k in range(num_total_chunks - len(all_labels))])
-    return all_labels[:num_total_chunks]
 
 def display_heatmap_grid(): 
     st.subheader("📘 Document Coverage & Performance Heatmap")
@@ -372,7 +287,6 @@ def display_heatmap_grid():
                 
                 st.session_state.selected_heatmap_chunk_index = idx_to_show
                 st.session_state.show_heatmap_chunk_detail = True
-                print(f"--- Callback: show_heatmap_chunk_detail set to {st.session_state.show_heatmap_chunk_detail} for index {st.session_state.selected_heatmap_chunk_index}, status now: {st.session_state.chunk_review_status[idx_to_show]} ---")
             return _callback
 
         if cols_for_squares is None: 
@@ -392,7 +306,7 @@ def display_heatmap_grid():
             cols_for_squares[_].empty()
 
 def generate_quiz_question(model, subject="Document Content", difficulty="average", previous_question_text=None, all_doc_chunks=None, focused_chunk_idx=None):
-    print(f"--- Terminal Log: Generating question. Mode: {'Focused' if focused_chunk_idx is not None else 'Normal'}. Difficulty: {difficulty}, Subject: '{subject}'. Prev Q: {'Yes' if previous_question_text else 'No'}. Chunks: {len(all_doc_chunks) if all_doc_chunks else 'None'}. Focused Idx: {focused_chunk_idx}")
+    print(f"--- Terminal Log: Generating question. Mode: {'Focused' if focused_chunk_idx is not None else 'Normal'}. Difficulty: {difficulty}. Focused Idx: {focused_chunk_idx}")
     
     if not model: 
         st.error("Q Gen: AI Model not configured.")
@@ -403,16 +317,11 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     
     faiss_index = st.session_state.get('faiss_index')
     doc_objective = st.session_state.get('dynamic_doc_objective', "To help the reader understand the provided text.")
-    if not doc_objective: doc_objective = "To help the reader understand the provided text."
-
-    context_text_list = []
     original_context_indices = [] 
     source_of_context = "" 
 
-    # FIX 3: HARD ANCHOR TO FOCUSED CHUNK. NEVER RANDOMIZE IF FOCUSED.
     if focused_chunk_idx is not None and (0 <= focused_chunk_idx < len(all_doc_chunks)):
         source_of_context = f"Focused on Chunk {focused_chunk_idx + 1}"
-        print(f"--- Terminal Log: Q Gen - Focused mode for chunk {focused_chunk_idx} ---")
         try:
             original_context_indices = [focused_chunk_idx]
             if faiss_index is not None:
@@ -425,9 +334,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                         break
             context_text_list = [all_doc_chunks[i] for i in original_context_indices]
             source_of_context += f" + FAISS neighbors"
-            print(f"--- Terminal Log: Q Gen - Focused context indices: {original_context_indices} ---")
         except Exception as e_faiss_focus:
-            print(f"--- FAISS query error (focused_chunk_idx mode): {e_faiss_focus} ---")
             original_context_indices = [focused_chunk_idx]
             context_text_list = [all_doc_chunks[focused_chunk_idx]]
             source_of_context += " (FAISS failed, using only focused chunk)"
@@ -438,7 +345,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
             if len(all_doc_chunks) > 0:
                 st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
                 random.shuffle(st.session_state.available_chunk_indices)
-            else: st.error("No substantive chunks to select from for Q1."); return None, []
+            else: return None, []
         if st.session_state.available_chunk_indices:
             indices_to_use_for_q1 = []
             for _ in range(NUM_CONTEXT_CHUNKS_TO_USE):
@@ -449,7 +356,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                 original_context_indices = indices_to_use_for_q1[:] 
                 context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)]
         if not context_text_list: 
-            if len(all_doc_chunks) == 0: st.error("No substantive chunks for Q1 context fallback."); return None, []
+            if len(all_doc_chunks) == 0: return None, []
             indexed_chunks = list(enumerate(all_doc_chunks))
             sorted_indexed_chunks = sorted(indexed_chunks, key=lambda x: len(x[1]), reverse=True)
             top_chunks_with_indices = sorted_indexed_chunks[:NUM_CONTEXT_CHUNKS_TO_USE]
@@ -478,7 +385,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                     context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)][:NUM_CONTEXT_CHUNKS_TO_USE]
                     original_context_indices = original_context_indices[:len(context_text_list)] 
                 except Exception as e_faiss_harder: 
-                    print(f"--- FAISS query error (harder): {e_faiss_harder} ---") 
+                    pass
             source_of_context = "New Section Fallback (FAISS on Prev Q for Harder)"
     elif difficulty == "simpler" and previous_question_text: 
         if faiss_index: 
@@ -492,7 +399,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                 context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)][:NUM_CONTEXT_CHUNKS_TO_USE]
                 original_context_indices = original_context_indices[:len(context_text_list)] 
             except Exception as e_faiss_simpler: 
-                print(f"--- FAISS query error (simpler): {e_faiss_simpler} ---")
+                pass
         else:
             source_of_context += " (FAISS Index Missing for simpler)"
             if previous_question_text and st.session_state.get('current_question_context_indices'): 
@@ -514,7 +421,6 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
         st.error("Failed to get any context for question generation after all fallbacks.")
         return None, [] 
     
-    print(f"--- Terminal Log: Context Source: {source_of_context}. Num context: {len(context_text_list)}. Indices: {original_context_indices} ---")
     context_to_send = "\n\n---\n\n".join(context_text_list)
     max_context_chars = 8000 
     if len(context_to_send) > max_context_chars: context_to_send = context_to_send[:max_context_chars] + "..."
@@ -555,7 +461,6 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     try:
         for attempt in range(max_retries):
             try:
-                print(f"--- Terminal Log: Sending prompt to Gemini AI (Attempt {attempt + 1}/{max_retries}) ---")
                 safety_settings = { 
                     genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
                     genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
@@ -563,38 +468,20 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                     genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
                 }
                 llm_response_obj = model.generate_content(prompt, safety_settings=safety_settings, request_options={'timeout': 60}) 
-                print(f"--- Terminal Log: Received response from Gemini AI (Attempt {attempt + 1}) ---")
                 if llm_response_obj and llm_response_obj.candidates and hasattr(llm_response_obj.candidates[0].content, 'parts') and llm_response_obj.candidates[0].content.parts:
                     response_text = llm_response_obj.candidates[0].content.parts[0].text.strip()
-                    if response_text: 
-                        print(f"--- Terminal Log: Got response text (Attempt {attempt + 1}). ---")
-                        break 
-                    else: 
-                        reason = llm_response_obj.candidates[0].finish_reason.name if llm_response_obj.candidates[0].finish_reason else "Empty content part"
-                        print(f"--- Terminal Log: AI Response Text Empty (Attempt {attempt + 1}). Reason: {reason} ---")
-                elif llm_response_obj and not llm_response_obj.candidates: 
-                    reason = llm_response_obj.prompt_feedback.block_reason.name if llm_response_obj.prompt_feedback and llm_response_obj.prompt_feedback.block_reason else "No candidates"
-                    print(f"--- Terminal Log: AI Response No Candidates (Attempt {attempt + 1}). Reason: {reason} ---")
-                else: 
-                    print(f"--- Terminal Log: AI Response Invalid/Null (Attempt {attempt + 1}) ---")
-                if attempt < max_retries - 1: 
-                    print(f"--- Terminal Log: Retrying LLM call in {retry_delay}s... ---")
-                    time.sleep(retry_delay)
+                    if response_text: break 
+                if attempt < max_retries - 1: time.sleep(retry_delay)
                 else: 
                     st.error(f"AI response issue after {max_retries} attempts.")
                     return None, [] 
             except Exception as e_api: 
-                print(f"--- Terminal Log: LLM API Error (Attempt {attempt + 1}/{max_retries}): {type(e_api).__name__}: {e_api} ---")
-                if attempt < max_retries - 1: 
-                    print(f"--- Terminal Log: Retrying LLM API call in {retry_delay}s... ---")
-                    time.sleep(retry_delay)
-                else: 
-                    raise e_api 
+                if attempt < max_retries - 1: time.sleep(retry_delay)
+                else: raise e_api 
         if not response_text: 
             st.error("Failed to get valid response text from AI after retries.")
             return None, [] 
         
-        print(f"--- Terminal Log: Raw AI Response (first 200 chars): {response_text[:200]}... ---")
         parsed_data = {}; options = {}
         patterns = {
             "question": r"^\**Question\**\s*[:\-]\s*(.+?)\s*(?=\n\s*\**\s*[A-Z]\s*[:\.\)]|\Z)",
@@ -626,7 +513,6 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                         content = re.sub(rf'({re.escape(word_to_space)})([a-zA-Z0-9,\.]+)', rf'\1 \2', content, flags=re.IGNORECASE)
                     content = re.sub(r'\s{2,}', ' ', content).strip() 
                 return content
-            print(f"--- Terminal Log: Parsing Warning: Could not find '{key}' in response. ---")
             return None
         
         parsed_data["question"] = extract_with_pattern("Question", patterns["question"], response_text)
@@ -642,34 +528,23 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
         
         req_keys = ["question", "options", "correct_answer", "explanation"];
         if not all(k in parsed_data and parsed_data[k] is not None for k in req_keys) or len(parsed_data.get("options", {})) != 4:
-            print(f"--- Terminal Log: PARSING FAILED. Data: {parsed_data}. Options count: {len(parsed_data.get('options', {}))}. ---")
             raise ValueError("Parsing failed. Missing required parts or options incomplete.")
         if parsed_data["correct_answer"] not in ["A", "B", "C", "D"]: 
-            print(f"--- Terminal Log: Invalid correct answer: '{parsed_data['correct_answer']}'. ---")
             raise ValueError(f"Invalid correct answer: '{parsed_data['correct_answer']}'")
         
-        print(f"--- Terminal Log: Successfully parsed question data. Indices: {original_context_indices}. ---")
         return parsed_data, original_context_indices 
     
     except ValueError as ve_parsing: 
-        print(f"--- Terminal Log: Parsing ValueError: {ve_parsing}. Raw response (first 500): '{response_text[:500] if response_text else 'None'}' ---")
         st.error("AI response format issue."); 
         traceback.print_exc()
         return None, [] 
     except Exception as e_overall: 
-        print(f"--- Terminal Log: Overall Q Gen Error: {type(e_overall).__name__}: {e_overall} ---")
-        safety_fb = "";
-        try: 
-            if llm_response_obj and hasattr(llm_response_obj, 'prompt_feedback') and llm_response_obj.prompt_feedback and hasattr(llm_response_obj.prompt_feedback, 'block_reason') and llm_response_obj.prompt_feedback.block_reason: safety_fb = f"Reason: {llm_response_obj.prompt_feedback.block_reason.name}"
-            elif llm_response_obj and llm_response_obj.candidates and hasattr(llm_response_obj.candidates[0], 'finish_reason') and llm_response_obj.candidates[0].finish_reason: safety_fb = f"Finish Reason: {llm_response_obj.candidates[0].finish_reason.name}"
-        except Exception as e_safety: print(f"--- Terminal Log: Error getting safety feedback: {e_safety} ---")
-        st.error(f"AI communication or processing error. {safety_fb}"); 
+        st.error(f"AI communication or processing error."); 
         traceback.print_exc()
         return None, []
 
 # --- Main Application Logic Starts Here ---
 
-# Conditional Title Setting
 if st.session_state.get('show_summary', False):
     st.title("Quiz Summary") 
 elif st.session_state.get('in_heatmap_quiz_mode', False):
@@ -677,45 +552,21 @@ elif st.session_state.get('in_heatmap_quiz_mode', False):
 else:
     st.title("AI Quiz Tutor") 
 
-# --- LLM Configuration ---
 if 'llm_configured' not in st.session_state: st.session_state.llm_configured = False
 if 'gemini_model' not in st.session_state: st.session_state.gemini_model = None
 if 'gemini_api_key' not in st.session_state: st.session_state.gemini_api_key = None
 try:
     if not st.session_state.llm_configured:
         if "GEMINI_API_KEY" not in st.secrets: 
-            print("--- TERMINAL DEBUG: GEMINI_API_KEY not found in st.secrets! ---")
             raise KeyError("API key not found in st.secrets")
-        
         st.session_state.gemini_api_key = st.secrets["GEMINI_API_KEY"]
-        if not st.session_state.gemini_api_key: 
-             print("--- TERMINAL DEBUG: GEMINI_API_KEY is present in secrets but is empty! ---")
-             raise ValueError("GEMINI_API_KEY value is empty in secrets.")
-
-        print(f"--- Terminal DEBUG: Configuring with API key ending: ...{st.session_state.gemini_api_key[-4:] if st.session_state.gemini_api_key and len(st.session_state.gemini_api_key) >=4 else 'KEY_IS_SHORT_EMPTY_OR_NONE'} ---")
         genai.configure(api_key=st.session_state.gemini_api_key)
-        print("--- Terminal DEBUG: genai.configure called. ---")
         st.session_state.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
-        print("--- Terminal DEBUG: GenerativeModel created. ---")
         st.session_state.llm_configured = True
-        print("--- Terminal DEBUG: Gemini AI Configured successfully. ---")
-    else:
-        print("--- Terminal DEBUG: Gemini AI was already configured. ---")
-except KeyError as ke: 
-    error_message = f"Gemini Config Error: {ke} - Check secrets."
-    print(f"--- TERMINAL DEBUG: LLM Config KeyError: {error_message} ---")
-    traceback.print_exc() 
-    st.error(error_message) 
-    st.session_state.llm_configured = False
 except Exception as e_gemini: 
-    error_message = f"AI Config Error: {e_gemini}"
-    print(f"--- TERMINAL DEBUG: LLM Config Exception: {error_message} ---")
-    traceback.print_exc() 
-    st.error(error_message) 
+    st.error(f"AI Config Error: {e_gemini}") 
     st.session_state.llm_configured = False
 
-
-# --- Initialize Session State ---
 st.session_state.setdefault('uploaded_file_key', None) 
 st.session_state.setdefault('substantive_chunks_for_quiz', None) 
 st.session_state.setdefault('vector_store_setup_done', False) 
@@ -748,12 +599,59 @@ st.session_state.setdefault('heatmap_quiz_source_chunk_idx', None)
 st.session_state.setdefault('heatmap_quiz_current_context_indices', [])
 st.session_state.setdefault('heatmap_quiz_last_answer_incorrect', False) 
 
+# --- CALLBACK DEFS ---
+def _start_heatmap_quiz_cb(idx):
+    st.session_state.in_heatmap_quiz_mode = True
+    st.session_state.heatmap_quiz_source_chunk_idx = idx
+    st.session_state.current_question_data = None 
+    st.session_state.quiz_started = False 
+    st.session_state.show_summary = False 
+    st.session_state.show_heatmap_chunk_detail = False 
+
+def _close_detail_cb():
+    st.session_state.show_heatmap_chunk_detail = False
+    st.session_state.selected_heatmap_chunk_index = None
+
+def _end_quiz_cb():
+    st.session_state.in_heatmap_quiz_mode = False
+    st.session_state.heatmap_quiz_source_chunk_idx = None
+    st.session_state.current_question_data = None 
+    st.session_state.quiz_started = False
+    st.session_state.show_summary = True
+    st.session_state.heatmap_quiz_last_answer_incorrect = False
+    st.session_state.show_heatmap_chunk_detail = False 
+    st.session_state.selected_heatmap_chunk_index = None  
+
+def _retry_topic_cb():
+    st.session_state.current_question_data = None 
+    st.session_state.show_explanation = False
+    st.session_state.feedback_message = None
+
+def _restart_quiz_cb():
+    st.session_state.quiz_started = False
+    st.session_state.question_number = 0 
+    st.session_state.current_question_data = None
+    st.session_state.user_answer = None
+    st.session_state.feedback_message = None
+    st.session_state.show_explanation = False
+    st.session_state.last_answer_correct = None
+    st.session_state.incorrectly_answered_questions = []
+    st.session_state.total_questions_answered = 0
+    st.session_state.show_summary = False
+    st.session_state.in_heatmap_quiz_mode = False 
+    st.session_state.heatmap_quiz_source_chunk_idx = None
+    if st.session_state.get('substantive_chunks_for_quiz'):
+        num_chunks = len(st.session_state.substantive_chunks_for_quiz)
+        st.session_state.available_chunk_indices = list(range(num_chunks))
+        random.shuffle(st.session_state.available_chunk_indices)
+        st.session_state.chunk_review_status = [0] * num_chunks
+    st.session_state.current_question_context_indices = []
 
 # --- File Uploader Logic ---
 uploaded_file = None 
-if not st.session_state.get('show_summary', False) and \
-   not st.session_state.get('quiz_started', False) and \
-   not st.session_state.get('in_heatmap_quiz_mode', False):
+is_home_screen = not st.session_state.get('show_summary', False) and not st.session_state.get('quiz_started', False) and not st.session_state.get('in_heatmap_quiz_mode', False) 
+
+if is_home_screen:
     uploaded_file_widget_result = st.file_uploader(
         "Upload your document ",
         type=["docx", "pdf", "pptx", "txt"], key="file_uploader"
@@ -764,8 +662,6 @@ if not st.session_state.get('show_summary', False) and \
         uploaded_file = uploaded_file_widget_result
     else:
         uploaded_file = st.session_state.get('uploaded_file_object_ref', None) 
-        
-        # FIX 1: Prevent file from being wiped if name contains an underscore
         if uploaded_file and st.session_state.get('uploaded_file_key') and \
            uploaded_file.name != st.session_state.get('uploaded_file_key','').rsplit('_', 1)[0] :
             uploaded_file = None 
@@ -773,20 +669,15 @@ if not st.session_state.get('show_summary', False) and \
 else: 
     uploaded_file = st.session_state.get('uploaded_file_object_ref', None)
 
-# --- Document Processing ---
-is_home_screen = not st.session_state.get('show_summary', False) and not st.session_state.get('quiz_started', False) and not st.session_state.get('in_heatmap_quiz_mode', False) 
 if uploaded_file is not None and is_home_screen: 
     current_file_key = f"{uploaded_file.name}_{uploaded_file.size}"
     needs_full_processing = False
     if st.session_state.get('uploaded_file_key') != current_file_key:
         needs_full_processing = True
-        print(f"--- New File Detected: {uploaded_file.name}. Triggering full processing and state reset. ---")
     elif not st.session_state.get('vector_store_setup_done', False):
         needs_full_processing = True
-        print(f"--- Same File ('{uploaded_file.name}'), but previous processing indicates setup was not completed. Retrying processing. ---")
     
     if needs_full_processing:
-        print("--- Resetting session states for new file processing. ---")
         st.session_state.uploaded_file_key = current_file_key
         st.session_state.substantive_chunks_for_quiz = None 
         st.session_state.doc_chunk_details = [] 
@@ -817,7 +708,6 @@ if uploaded_file is not None and is_home_screen:
             st.session_state.doc_chunk_details = [{"text": item['text'], "full_headings_list": item.get('headings', [])} for item in docling_output_list]
             st.session_state.substantive_chunks_for_quiz = [item['text'] for item in st.session_state.doc_chunk_details]
             st.session_state.faiss_index_chunks = st.session_state.substantive_chunks_for_quiz 
-            print(f"--- Post-Docling: Prepared {len(st.session_state.substantive_chunks_for_quiz)} chunks with details. ---")
 
             num_words_for_hover = 50
             st.session_state.chunk_hover_labels = [] 
@@ -845,8 +735,6 @@ if uploaded_file is not None and is_home_screen:
                     else: 
                         st.session_state.dynamic_doc_subject = CORE_SUBJECT
                         st.session_state.dynamic_doc_objective = "To learn about the provided content."
-                print(f"--- Dynamically Determined Subject (after processing): '{st.session_state.dynamic_doc_subject}' ---")
-                print(f"--- Dynamically Determined Objective (after processing): '{st.session_state.dynamic_doc_objective}' ---")
 
             if st.session_state.get('dynamic_doc_subject'):
                 st.session_state.current_doc_subject = st.session_state.dynamic_doc_subject
@@ -854,39 +742,19 @@ if uploaded_file is not None and is_home_screen:
                 st.session_state.current_doc_subject = uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ')
             else: 
                 st.session_state.current_doc_subject = CORE_SUBJECT
-            if not st.session_state.get('dynamic_doc_objective') and st.session_state.current_doc_subject != CORE_SUBJECT:
-                st.session_state.dynamic_doc_objective = f"To learn about {st.session_state.current_doc_subject}."
-            elif not st.session_state.get('dynamic_doc_objective'):
-                st.session_state.dynamic_doc_objective = "To understand general concepts."
             
             if st.session_state.substantive_chunks_for_quiz and st.session_state.llm_configured: 
                 with st.spinner(f"Building FAISS index for '{uploaded_file.name}'..."):
                     setup_success = setup_vector_store(st.session_state.substantive_chunks_for_quiz, st.session_state.gemini_api_key, uploaded_file.name)
                     st.session_state.vector_store_setup_done = setup_success
-                    if not setup_success:
-                        print(f"--- FAISS VS setup FAILED for {uploaded_file.name}. ---")
-            else:
-                print("--- Skipping FAISS setup: No substantive chunks from Docling or LLM not configured. ---")
-                st.session_state.vector_store_setup_done = False
         else: 
             st.session_state.vector_store_setup_done = False
-    else: 
-        if uploaded_file:
-            print(f"--- Document '{uploaded_file.name}' already processed and vector store setup. Using cached data. ---")
-            if st.session_state.get('dynamic_doc_subject'):
-                st.session_state.current_doc_subject = st.session_state.dynamic_doc_subject
-            elif st.session_state.current_doc_subject == CORE_SUBJECT:
-                st.session_state.current_doc_subject = uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ')
-    
-    if uploaded_file and not st.session_state.get('vector_store_setup_done') and \
-       st.session_state.get('substantive_chunks_for_quiz') is not None :
-        st.warning(f"Doc '{uploaded_file.name}' processed, but vector store setup might have failed. Quiz may use basic context.")
 
-# --- App Logic (Conditions for displaying quiz UI, summary, etc.) ---
+has_chunks = st.session_state.get('substantive_chunks_for_quiz') is not None
 
-# FIX 2: Check for data chunk persistence directly instead of relying on the widget file state
-if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get('substantive_chunks_for_quiz'):
-    
+# --- App Logic ---
+
+if st.session_state.get('in_heatmap_quiz_mode', False) and has_chunks:
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
         
@@ -919,11 +787,7 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
             st.rerun()
         else:
             st.error("Failed to generate a question for this topic.")
-            st.session_state.in_heatmap_quiz_mode = False
-            st.session_state.heatmap_quiz_source_chunk_idx = None
-            st.session_state.current_question_data = None 
-            st.session_state.show_summary = True 
-            st.rerun()
+            st.button("Back to Quiz Summary", on_click=_end_quiz_cb)
 
     if st.session_state.current_question_data:
         q_data = st.session_state.current_question_data
@@ -988,7 +852,6 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
                                         st.session_state.chunk_review_status[idx_status] = 2 
                                     elif current_status == 2: 
                                         st.session_state.chunk_review_status[idx_status] = 3
-                                print(f"--- Terminal Log: Heatmap Quiz - Chunk {idx_status} status updated to {st.session_state.chunk_review_status[idx_status]} ---")
                     
                     st.session_state.show_explanation = True
                     st.rerun()
@@ -1000,32 +863,16 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
                 st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
 
                 if st.session_state.last_answer_correct:
-                    if st.button("Back to Quiz Summary", key="hm_q_correct_to_summary_btn"):
-                        st.session_state.in_heatmap_quiz_mode = False
-                        st.session_state.heatmap_quiz_source_chunk_idx = None
-                        st.session_state.current_question_data = None
-                        st.session_state.show_summary = True
-                        st.session_state.heatmap_quiz_last_answer_incorrect = False
-                        st.rerun()
+                    st.button("Back to Quiz Summary", key="hm_q_correct_to_summary_btn", on_click=_end_quiz_cb)
                 else: 
                     if st.session_state.last_answer_correct is False : 
-                        if st.button("Try Another Question on this Topic", key="hm_q_retry_topic_btn"):
-                            st.session_state.current_question_data = None 
-                            st.session_state.show_explanation = False
-                            st.session_state.feedback_message = None
-                            st.rerun()
+                        st.button("Try Another Question on this Topic", key="hm_q_retry_topic_btn", on_click=_retry_topic_cb)
             
             st.divider()
-            if st.button("End Focused Quiz & View Summary", key="hm_q_stop_summary_btn"):
-                st.session_state.in_heatmap_quiz_mode = False
-                st.session_state.heatmap_quiz_source_chunk_idx = None
-                st.session_state.current_question_data = None 
-                st.session_state.show_summary = True
-                st.session_state.heatmap_quiz_last_answer_incorrect = False
-                st.rerun()
+            st.button("End Focused Quiz & View Summary", key="hm_q_stop_summary_btn", on_click=_end_quiz_cb)
 
-elif st.session_state.get('show_summary', False):
-    _summary_scroll_anchor = st.empty() # Attempt to influence scroll
+elif st.session_state.get('show_summary', False) and has_chunks:
+    _summary_scroll_anchor = st.empty() 
 
     if uploaded_file: 
         st.caption(f"Document: {uploaded_file.name}")
@@ -1061,7 +908,6 @@ elif st.session_state.get('show_summary', False):
         st.info("No questions were answered in this session.")
     st.divider() 
     
-    # Chunk Detail Expander - Placed before the heatmap's own expander
     if st.session_state.get('show_heatmap_chunk_detail', False) and \
        st.session_state.get('selected_heatmap_chunk_index') is not None:
         selected_idx = st.session_state.selected_heatmap_chunk_index
@@ -1102,53 +948,21 @@ elif st.session_state.get('show_summary', False):
                 
                 col1_exp, col2_exp = st.columns(2)
                 with col1_exp:
-                    if st.button("Quiz me on this chunk", key=f"quiz_me_btn_summary_{selected_idx}"): 
-                        st.session_state.in_heatmap_quiz_mode = True
-                        st.session_state.heatmap_quiz_source_chunk_idx = selected_idx
-                        st.session_state.current_question_data = None 
-                        st.session_state.quiz_started = False 
-                        st.session_state.show_summary = False 
-                        st.session_state.show_heatmap_chunk_detail = False 
-                        st.rerun()
+                    st.button("Quiz me on this chunk", key=f"quiz_me_btn_summary_{selected_idx}", on_click=_start_heatmap_quiz_cb, args=(selected_idx,))
                 with col2_exp:
-                    if st.button("Close Detail", key=f"close_detail_exp_summary_{selected_idx}"): 
-                        st.session_state.show_heatmap_chunk_detail = False
-                        st.session_state.selected_heatmap_chunk_index = None
-                        st.rerun()
+                    st.button("Close Detail", key=f"close_detail_exp_summary_{selected_idx}", on_click=_close_detail_cb)
         else: 
             st.session_state.show_heatmap_chunk_detail = False
             st.session_state.selected_heatmap_chunk_index = None
     
-    with st.expander("📘 Document Coverage & Performance Heatmap"): # Removed expanded=False
+    with st.expander("📘 Document Coverage & Performance Heatmap"): 
         display_heatmap_grid() 
     
     st.divider()
-    if st.button("Start New Quiz Once More", key="start_new_quiz_summary"):
-        st.session_state.quiz_started = False
-        st.session_state.question_number = 0 
-        st.session_state.current_question_data = None
-        st.session_state.user_answer = None
-        st.session_state.feedback_message = None
-        st.session_state.show_explanation = False
-        st.session_state.last_answer_correct = None
-        st.session_state.incorrectly_answered_questions = []
-        st.session_state.total_questions_answered = 0
-        st.session_state.show_summary = False
-        st.session_state.in_heatmap_quiz_mode = False 
-        st.session_state.heatmap_quiz_source_chunk_idx = None
-        if st.session_state.get('substantive_chunks_for_quiz'):
-            num_chunks = len(st.session_state.substantive_chunks_for_quiz)
-            st.session_state.available_chunk_indices = list(range(num_chunks))
-            random.shuffle(st.session_state.available_chunk_indices)
-            st.session_state.chunk_review_status = [0] * num_chunks
-        st.session_state.current_question_context_indices = []
-        st.rerun()
+    st.button("Start New Quiz Once More", key="start_new_quiz_summary", on_click=_restart_quiz_cb)
 
-# FIX 2: Replaced 'uploaded_file is not None' with check for text chunks
-elif st.session_state.get('vector_store_setup_done') and \
-     st.session_state.get('substantive_chunks_for_quiz') and \
-     st.session_state.llm_configured and \
-     not st.session_state.get('quiz_started', False):
+elif st.session_state.get('vector_store_setup_done') and has_chunks and \
+     st.session_state.llm_configured and not st.session_state.get('quiz_started', False):
     
     st.markdown("#### Document Analyzed and ready to test your knowledge") 
     if st.session_state.current_doc_subject:
@@ -1179,8 +993,6 @@ elif st.session_state.get('vector_store_setup_done') and \
             else: doc_subject_for_q1 = CORE_SUBJECT
         st.session_state.current_doc_subject = doc_subject_for_q1
         
-        print(f"--- Start Quiz Clicked. Using Subject for Q1: '{st.session_state.current_doc_subject}' ---") 
-
         with st.spinner("Generating first question..."):
             q_data, context_indices = generate_quiz_question(
                 model=st.session_state.gemini_model, 
@@ -1197,8 +1009,7 @@ elif st.session_state.get('vector_store_setup_done') and \
             st.session_state.quiz_started = False 
             st.session_state.question_number = 0
 
-# FIX 2: Replaced 'uploaded_file is not None' with check for text chunks
-elif st.session_state.get('quiz_started', False) and st.session_state.get('substantive_chunks_for_quiz'):
+elif st.session_state.get('quiz_started', False) and has_chunks:
     if uploaded_file:
         st.caption(f"Document: {uploaded_file.name}")
 
@@ -1245,7 +1056,6 @@ elif st.session_state.get('quiz_started', False) and st.session_state.get('subst
                                         st.session_state.chunk_review_status[idx_status] = 2 
                                     elif current_status == 2: 
                                         st.session_state.chunk_review_status[idx_status] = 3
-                                print(f"--- Terminal Log: Chunk index {idx_status} (quiz): old status {current_status}, new status {st.session_state.chunk_review_status[idx_status]} ---")
                     st.session_state.show_explanation = True; st.rerun()
             feedback_container = st.container()
             with feedback_container:
@@ -1255,34 +1065,26 @@ elif st.session_state.get('quiz_started', False) and st.session_state.get('subst
                     else: st.warning(st.session_state.feedback_message)
                     if st.session_state.show_explanation: st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
             if st.button("Next Question"):
-                spinner_message = "Moving to a new section..." if st.session_state.last_answer_correct else "Revisiting this topic..."
-                difficulty_for_next_q = "harder" if st.session_state.last_answer_correct else "simpler"
-                st.session_state.feedback_message = None; st.session_state.show_explanation = False
-                st.session_state.user_answer = None; st.session_state.last_answer_correct = None
-                with st.spinner(spinner_message):
-                    next_q, context_indices = generate_quiz_question(
+                diff = "harder" if st.session_state.last_answer_correct else "simpler"
+                st.session_state.show_explanation = False
+                st.session_state.user_answer = None
+                with st.spinner("Moving to next section..." if st.session_state.last_answer_correct else "Revisiting topic..."):
+                    next_q, ctx_idx = generate_quiz_question(
                         model=st.session_state.gemini_model, subject=doc_subject, 
-                        difficulty=difficulty_for_next_q, previous_question_text=q_data['question'], 
+                        difficulty=diff, previous_question_text=q_data['question'], 
                         all_doc_chunks=st.session_state.substantive_chunks_for_quiz
                     )
                 if next_q: 
                     st.session_state.current_question_data = next_q
-                    st.session_state.current_question_context_indices = context_indices
+                    st.session_state.current_question_context_indices = ctx_idx
                     st.session_state.question_number += 1
                     st.rerun()
-                else: st.error(f"Failed to generate next question (type: {difficulty_for_next_q}). Please try again or stop quiz.")
+            
             st.divider()
-            if st.button("Stop Quiz"): 
-                st.session_state.show_summary = True; st.session_state.quiz_started = False; 
-                st.session_state.in_heatmap_quiz_mode = False 
-                st.session_state.heatmap_quiz_source_chunk_idx = None
-                st.session_state.show_heatmap_chunk_detail = False 
-                st.session_state.selected_heatmap_chunk_index = None  
-                st.rerun()
+            st.button("Stop Quiz", on_click=_stop_normal_quiz_cb)
         else:
             st.error("Quiz active, but no question data. Error? Stop/restart.")
-            if st.button("Stop Quiz (Error State)"): 
-                st.session_state.quiz_started = False; st.session_state.show_summary = True; st.rerun()
+            st.button("Stop Quiz (Error State)", on_click=_stop_normal_quiz_cb)
 
 else: 
     if uploaded_file is None and st.session_state.llm_configured :
