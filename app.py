@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - The True Fix)
+# app.py (AI_Quiz_Tutor_Upload version - Detailed LLM Error Logging)
 
 import streamlit as st
 
@@ -28,19 +28,20 @@ try:
     from transformers import AutoTokenizer 
 except ImportError as e_import:
     st.error(f"CRITICAL IMPORT ERROR occurred: {e_import}")
-    st.warning("This likely means 'docling', 'docling-core', or 'transformers' is not installed correctly in your Python environment.")
+    st.warning("This likely means 'docling', 'docling-core', or 'transformers' is not installed correctly in your Python 3.11 environment.")
+    st.info("Please stop Streamlit, activate your 'py311_env', ensure correct installation of docling and its dependencies, then restart Streamlit.")
     st.stop() 
 except Exception as e_generic_import:
-    st.error(f"UNEXPECTED ERROR during crucial imports: {e_generic_import}")
+    st.error(f"UNEXPECTED ERROR during crucial imports: {e_generic_import} ([Errno {e_generic_import.errno if hasattr(e_generic_import, 'errno') else 'N/A'}] {e_generic_import})")
     st.stop()
 
 # --- Configuration ---
 CORE_SUBJECT = "Insurance Principles" 
 EMBEDDING_MODEL = "models/text-embedding-004"
 CHROMA_COLLECTION_NAME = "uploaded_doc_chunks" 
-NUM_CONTEXT_CHUNKS_TO_USE = 3      
+NUM_CONTEXT_CHUNKS_TO_USE = 3      # Base number of chunks for final context
 MIN_WORDS_FOR_CONTENT_CHUNK = 4 
-NUM_CHUNKS_TO_FETCH_SEMANTICALLY = 5 
+NUM_CHUNKS_TO_FETCH_SEMANTICALLY = 5 # How many to initially FETCH for semantic search (for simpler or harder-fallback)
 
 # --- Function Definitions ---
 def setup_vector_store(substantive_chunks_list, api_key_for_ef, uploaded_filename="document"):
@@ -210,6 +211,80 @@ def process_document_with_docling(uploaded_file_object, filename):
         traceback.print_exc()
         return None
 
+def generate_chunk_labels(chunks_list, llm_model, prompt_batch_size=5, inter_batch_delay_seconds=4):
+    if not chunks_list: 
+        print("--- Chunk Labeling: No chunks provided. ---")
+        return [""] * len(chunks_list) 
+    print(f"--- Chunk Labeling: Starting label generation for {len(chunks_list)} chunks in batches of {prompt_batch_size}. Delay: {inter_batch_delay_seconds}s ---")
+    all_labels = []
+    num_total_chunks = len(chunks_list)
+    num_batches = (num_total_chunks + prompt_batch_size - 1) // prompt_batch_size
+    progress_text = "Generating descriptive labels for document sections..."
+    label_progress_bar = st.progress(0, text=f"{progress_text} (Batch 0/{num_batches})")
+    for i in range(num_batches):
+        batch_start_index = i * prompt_batch_size
+        batch_end_index = min((i + 1) * prompt_batch_size, num_total_chunks)
+        current_batch_chunks_texts = chunks_list[batch_start_index:batch_end_index]
+        if not current_batch_chunks_texts: continue
+        print(f"--- Chunk Labeling: Preparing Batch {i+1}/{num_batches} ({len(current_batch_chunks_texts)} chunks) for LLM ---")
+        prompt_for_batch = "For each of the following numbered paragraphs, provide a very concise topic label (ideally 2-4 words) that best describes its main content. Each label should be suitable for a heatmap display. Focus on the most specific subject matter of each paragraph. Avoid generic phrases like 'paragraph content' or 'text excerpt'.\n\n"
+        for idx_in_batch, chunk_text in enumerate(current_batch_chunks_texts):
+            max_label_chunk_chars = 750 
+            truncated_chunk_text = chunk_text[:max_label_chunk_chars]
+            if len(chunk_text) > max_label_chunk_chars:
+                truncated_chunk_text += "..."
+            prompt_for_batch += f"Paragraph {idx_in_batch + 1}:\n---\n{truncated_chunk_text}\n---\n\n"
+        prompt_for_batch += f"Output the labels in this exact format, each on a new line, numbered starting from 1 (e.g., '1: Label for Paragraph 1', '2: Label for Paragraph 2', etc. up to '{len(current_batch_chunks_texts)}:' ):"
+        batch_generated_labels = []
+        try:
+            print(f"--- Chunk Labeling: Sending Batch {i+1} to LLM ---")
+            for attempt in range(2): 
+                label_response = llm_model.generate_content(prompt_for_batch, request_options={'timeout': 90}) 
+                if label_response and label_response.text:
+                    raw_labels_text = label_response.text.strip()
+                    print(f"--- Chunk Labeling: Batch {i+1} Raw LLM Response ---\n{raw_labels_text}\n--------------------")
+                    temp_labels_for_batch = {} 
+                    for line in raw_labels_text.splitlines():
+                        match = re.match(r"^\s*(\d+)\s*[:\-]\s*(.+)", line)
+                        if match:
+                            label_num = int(match.group(1))
+                            label_text = match.group(2).strip().replace("\"", "").replace("'", "")
+                            label_text = " ".join(label_text.split())[:50] 
+                            if label_text: temp_labels_for_batch[label_num] = label_text
+                    processed_all_in_batch = True
+                    for k_idx in range(len(current_batch_chunks_texts)):
+                        if (k_idx + 1) not in temp_labels_for_batch:
+                            processed_all_in_batch = False; break
+                    if processed_all_in_batch:
+                        for k_idx in range(len(current_batch_chunks_texts)):
+                            batch_generated_labels.append(temp_labels_for_batch[k_idx+1])
+                        print(f"--- Chunk Labeling: Successfully labeled batch {i+1} with {len(batch_generated_labels)} labels. ---")
+                        break 
+                    else: 
+                        print(f"--- Chunk Labeling: Warning - Batch {i+1} parsing failed or label count mismatch. Expected {len(current_batch_chunks_texts)}, got {len(temp_labels_for_batch)}. Retrying batch if possible. ---")
+                        batch_generated_labels = [] 
+                if attempt < 1: 
+                    print(f"--- Chunk Labeling: Retrying batch {i+1} in {inter_batch_delay_seconds * 2}s ... ---")
+                    time.sleep(inter_batch_delay_seconds * 2) 
+                else: 
+                    print(f"--- Chunk Labeling: Max retries for batch {i+1} reached. Using default labels for this batch. ---")
+        except Exception as e_label_batch:
+            print(f"--- Chunk Labeling: Error generating labels for batch {i+1}: {e_label_batch} ---")
+        if len(batch_generated_labels) != len(current_batch_chunks_texts):
+            batch_generated_labels = [f"Chunk {batch_start_index + k + 1}" for k in range(len(current_batch_chunks_texts))]
+            print(f"--- Chunk Labeling: Using default labels for batch {i+1}. ---")
+        all_labels.extend(batch_generated_labels)
+        label_progress_bar.progress(float((i + 1) / num_batches), text=f"{progress_text} (Batch {i+1}/{num_batches} processed)")
+        if i < num_batches - 1: 
+            print(f"--- Chunk Labeling: Waiting {inter_batch_delay_seconds}s before next batch... ---")
+            time.sleep(inter_batch_delay_seconds)
+    label_progress_bar.empty()
+    print(f"--- Chunk Labeling: Finished. Generated {len(all_labels)} labels. ---")
+    if len(all_labels) != num_total_chunks:
+        print(f"--- Chunk Labeling: CRITICAL - Final label count mismatch. Expected {num_total_chunks}, got {len(all_labels)}. Padding with defaults. ---")
+        all_labels.extend([f"Chunk {len(all_labels) + k + 1}" for k in range(num_total_chunks - len(all_labels))])
+    return all_labels[:num_total_chunks]
+
 def display_heatmap_grid(): 
     st.subheader("📘 Document Coverage & Performance Heatmap")
     st.caption("Click on a section's colored square to view its full text. Colors indicate performance.")
@@ -317,60 +392,159 @@ def display_heatmap_grid():
             cols_for_squares[_].empty()
 
 def generate_quiz_question(model, subject="Document Content", difficulty="average", previous_question_text=None, all_doc_chunks=None, focused_chunk_idx=None):
-    if not model or not all_doc_chunks: return None, []
+    print(f"--- Terminal Log: Generating question. Mode: {'Focused' if focused_chunk_idx is not None else 'Normal'}. Difficulty: {difficulty}, Subject: '{subject}'. Prev Q: {'Yes' if previous_question_text else 'No'}. Chunks: {len(all_doc_chunks) if all_doc_chunks else 'None'}. Focused Idx: {focused_chunk_idx}")
+    
+    if not model: 
+        st.error("Q Gen: AI Model not configured.")
+        return None, [] 
+    if not all_doc_chunks: 
+        st.error("Q Gen: No document chunks provided (all_doc_chunks).")
+        return None, []
+    
     faiss_index = st.session_state.get('faiss_index')
     doc_objective = st.session_state.get('dynamic_doc_objective', "To help the reader understand the provided text.")
+    if not doc_objective: doc_objective = "To help the reader understand the provided text."
+
+    context_text_list = []
     original_context_indices = [] 
-    
-    # ---------------------------------------------------------
-    # FIXED: Hard Anchor to Focused Chunk - Never drops context
-    # ---------------------------------------------------------
+    source_of_context = "" 
+
+    # --- FIXED: HARD ANCHOR TO FOCUSED CHUNK ---
     if focused_chunk_idx is not None and (0 <= focused_chunk_idx < len(all_doc_chunks)):
+        source_of_context = f"Focused on Chunk {focused_chunk_idx + 1}"
+        print(f"--- Terminal Log: Q Gen - Focused mode for chunk {focused_chunk_idx} ---")
         try:
             original_context_indices = [focused_chunk_idx]
             if faiss_index is not None:
-                query_emb = genai.embed_content(
-                    model=EMBEDDING_MODEL,
-                    content=all_doc_chunks[focused_chunk_idx],
-                    task_type="RETRIEVAL_QUERY"
-                )['embedding']
-
-                distances, faiss_indices_ret = faiss_index.search(
-                    np.array(query_emb).astype('float32').reshape(1, -1),
-                    k=NUM_CONTEXT_CHUNKS_TO_USE
-                )
-                for idx in faiss_indices_ret[0]:
+                query_text = all_doc_chunks[focused_chunk_idx]
+                query_embedding_response = genai.embed_content(model=EMBEDDING_MODEL, content=query_text, task_type="RETRIEVAL_QUERY")
+                query_embedding = np.array(query_embedding_response['embedding']).astype('float32').reshape(1, -1)
+                k_to_fetch = max(NUM_CHUNKS_TO_FETCH_SEMANTICALLY, NUM_CONTEXT_CHUNKS_TO_USE + 1) 
+                distances, faiss_indices_ret = faiss_index.search(query_embedding, k=k_to_fetch)
+                retrieved_indices = list(faiss_indices_ret[0])
+                for idx in retrieved_indices:
+                    if len(original_context_indices) >= NUM_CONTEXT_CHUNKS_TO_USE: break
                     if idx != focused_chunk_idx and idx not in original_context_indices and 0 <= idx < len(all_doc_chunks):
                         original_context_indices.append(int(idx))
-                    if len(original_context_indices) >= NUM_CONTEXT_CHUNKS_TO_USE:
-                        break
-        except Exception:
+            context_text_list = [all_doc_chunks[i] for i in original_context_indices]
+            source_of_context += f" + FAISS neighbors"
+            print(f"--- Terminal Log: Q Gen - Focused context indices: {original_context_indices} ---")
+        except Exception as e_faiss_focus:
+            print(f"--- FAISS query error (focused_chunk_idx mode): {e_faiss_focus} ---")
             original_context_indices = [focused_chunk_idx]
+            context_text_list = [all_doc_chunks[focused_chunk_idx]]
+            source_of_context += " (FAISS failed, using only focused chunk)"
             
     elif not previous_question_text: 
-        if not st.session_state.available_chunk_indices:
-            st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
-            random.shuffle(st.session_state.available_chunk_indices)
-        original_context_indices = [st.session_state.available_chunk_indices.pop(0) for _ in range(min(NUM_CONTEXT_CHUNKS_TO_USE, len(st.session_state.available_chunk_indices)))]
-    elif difficulty == "harder" and st.session_state.available_chunk_indices: 
-        original_context_indices = [st.session_state.available_chunk_indices.pop(0) for _ in range(min(NUM_CONTEXT_CHUNKS_TO_USE, len(st.session_state.available_chunk_indices)))]
-    elif difficulty == "simpler" and previous_question_text and faiss_index:
-        try:
-            query_emb = genai.embed_content(model=EMBEDDING_MODEL, content=previous_question_text, task_type="RETRIEVAL_QUERY")['embedding']
-            distances, faiss_indices_ret = faiss_index.search(np.array(query_emb).astype('float32').reshape(1, -1), k=NUM_CONTEXT_CHUNKS_TO_USE)
-            original_context_indices = [int(i) for i in faiss_indices_ret[0] if 0 <= i < len(all_doc_chunks)]
-        except: original_context_indices = st.session_state.get('current_question_context_indices', [])
+        source_of_context = "Q1 - From Available Shuffled"
+        if 'available_chunk_indices' not in st.session_state or not st.session_state.available_chunk_indices:
+            if len(all_doc_chunks) > 0:
+                st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
+                random.shuffle(st.session_state.available_chunk_indices)
+            else: st.error("No substantive chunks to select from for Q1."); return None, []
+        if st.session_state.available_chunk_indices:
+            indices_to_use_for_q1 = []
+            for _ in range(NUM_CONTEXT_CHUNKS_TO_USE):
+                if st.session_state.available_chunk_indices:
+                    indices_to_use_for_q1.append(st.session_state.available_chunk_indices.pop(0)) 
+                else: break
+            if indices_to_use_for_q1:
+                original_context_indices = indices_to_use_for_q1[:] 
+                context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)]
+        if not context_text_list: 
+            if len(all_doc_chunks) == 0: st.error("No substantive chunks for Q1 context fallback."); return None, []
+            indexed_chunks = list(enumerate(all_doc_chunks))
+            sorted_indexed_chunks = sorted(indexed_chunks, key=lambda x: len(x[1]), reverse=True)
+            top_chunks_with_indices = sorted_indexed_chunks[:NUM_CONTEXT_CHUNKS_TO_USE]
+            context_text_list = [chunk_text for _, chunk_text in top_chunks_with_indices]
+            original_context_indices = [idx for idx, _ in top_chunks_with_indices]
+            source_of_context = "Q1 - Longest Chunks (Fallback)"
+    elif difficulty == "harder": 
+        source_of_context = "New Section (Correct Answer)"
+        if st.session_state.available_chunk_indices:
+            indices_to_use_new_section = []
+            for _ in range(NUM_CONTEXT_CHUNKS_TO_USE): 
+                if st.session_state.available_chunk_indices: 
+                    indices_to_use_new_section.append(st.session_state.available_chunk_indices.pop(0)) 
+                else: break
+            if indices_to_use_new_section:
+                original_context_indices = indices_to_use_new_section[:]
+                context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)]
+        if not context_text_list: 
+            if faiss_index and previous_question_text: 
+                query_text_for_vector_search = previous_question_text
+                try:
+                    query_embedding_response = genai.embed_content(model=EMBEDDING_MODEL, content=query_text_for_vector_search, task_type="RETRIEVAL_QUERY")
+                    query_embedding = np.array(query_embedding_response['embedding']).astype('float32').reshape(1, -1)
+                    distances, faiss_indices_ret = faiss_index.search(query_embedding, k=NUM_CHUNKS_TO_FETCH_SEMANTICALLY)
+                    original_context_indices = list(faiss_indices_ret[0]) 
+                    context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)][:NUM_CONTEXT_CHUNKS_TO_USE]
+                    original_context_indices = original_context_indices[:len(context_text_list)] 
+                except Exception as e_faiss_harder: 
+                    print(f"--- FAISS query error (harder): {e_faiss_harder} ---") 
+            source_of_context = "New Section Fallback (FAISS on Prev Q for Harder)"
+    elif difficulty == "simpler" and previous_question_text: 
+        if faiss_index: 
+            source_of_context = "Same Topic (Incorrect Answer - FAISS)"
+            query_text_for_vector_search = previous_question_text 
+            try:
+                query_embedding_response = genai.embed_content(model=EMBEDDING_MODEL, content=query_text_for_vector_search, task_type="RETRIEVAL_QUERY")
+                query_embedding = np.array(query_embedding_response['embedding']).astype('float32').reshape(1, -1)
+                distances, faiss_indices_ret = faiss_index.search(query_embedding, k=NUM_CHUNKS_TO_FETCH_SEMANTICALLY)
+                original_context_indices = list(faiss_indices_ret[0])
+                context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)][:NUM_CONTEXT_CHUNKS_TO_USE]
+                original_context_indices = original_context_indices[:len(context_text_list)] 
+            except Exception as e_faiss_simpler: 
+                print(f"--- FAISS query error (simpler): {e_faiss_simpler} ---")
+        else:
+            source_of_context += " (FAISS Index Missing for simpler)"
+            if previous_question_text and st.session_state.get('current_question_context_indices'): 
+                original_context_indices = st.session_state.current_question_context_indices
+                context_text_list = [all_doc_chunks[i] for i in original_context_indices if 0 <= i < len(all_doc_chunks)]
     
-    if not original_context_indices:
-        original_context_indices = random.sample(range(len(all_doc_chunks)), min(NUM_CONTEXT_CHUNKS_TO_USE, len(all_doc_chunks)))
+    if not context_text_list and all_doc_chunks: 
+        new_source_part = " + Final Random Fallback" if source_of_context else "Final Random Fallback"
+        source_of_context += new_source_part
+        num_to_sample_random = min(NUM_CONTEXT_CHUNKS_TO_USE, len(all_doc_chunks))
+        if num_to_sample_random > 0:
+            original_context_indices = random.sample(list(range(len(all_doc_chunks))), num_to_sample_random)
+            context_text_list = [all_doc_chunks[i] for i in original_context_indices]
+        else: 
+            context_text_list = all_doc_chunks[:NUM_CONTEXT_CHUNKS_TO_USE] 
+            original_context_indices = list(range(len(context_text_list)))
 
-    context_to_send = "\n\n---\n\n".join([all_doc_chunks[i] for i in original_context_indices])[:8000]
+    if not context_text_list: 
+        st.error("Failed to get any context for question generation after all fallbacks.")
+        return None, [] 
+    
+    print(f"--- Terminal Log: Context Source: {source_of_context}. Num context: {len(context_text_list)}. Indices: {original_context_indices} ---")
+    context_to_send = "\n\n---\n\n".join(context_text_list)
+    max_context_chars = 8000 
+    if len(context_to_send) > max_context_chars: context_to_send = context_to_send[:max_context_chars] + "..."
+    
+    if st.session_state.get('in_heatmap_quiz_mode', False):
+        difficulty_prompt_instruction = f"Generate a question of average difficulty specifically focused on the core concepts within the 'Provided Text Context'. The document's primary objective is: '{doc_objective}'."
+        if st.session_state.get('heatmap_quiz_last_answer_incorrect', False) : 
+             difficulty_prompt_instruction = f"The user answered the previous question on this topic incorrectly. Generate a new, different question of average or simpler difficulty that targets the core concept of the 'Provided Text Context' to help reinforce understanding. The document's primary objective is: '{doc_objective}'."
+    elif not previous_question_text :
+        difficulty_prompt_instruction = f"Generate a question of average difficulty based on the provided context. The document's primary objective is: '{doc_objective}'."
+    elif difficulty == "harder": 
+        difficulty_prompt_instruction = f"The user answered the previous question correctly. You are now being provided context from a new, different section of the document. The document's primary objective is: '{doc_objective}'. Generate a question of average difficulty that tests understanding of the core concepts presented in this new context. Aim to explore a different aspect or principle if the context allows."
+    elif difficulty == "simpler" and previous_question_text: 
+        difficulty_prompt_instruction = f"The user answered the previous question incorrectly. Generate another question of average difficulty that targets the core concept of the previous question, using straightforward language based on the provided context (which is related to the failed question) to help reinforce understanding."
+    else: 
+        difficulty_prompt_instruction = f"Generate a question of average difficulty based on the provided context. The document's primary objective is: '{doc_objective}'."
     
     prompt = f"""
-    You are an expert quiz generator. The subject of the document is '{subject}'. Objective: '{doc_objective}'.
-    Generate a question of {difficulty} difficulty testing understanding of principles covered directly in the 'Provided Text Context'.
-    NO METADATA QUESTIONS. Focus strictly on the substance.
-    Output Format (EXACTLY as shown, using these precise labels):
+    You are an expert quiz generator. The subject of the document is '{subject}'.
+    {difficulty_prompt_instruction}
+    Guidelines:
+    1. The question must test understanding of principles related to '{subject}' and the document's objective, directly covered in the 'Provided Text Context'.
+    2. NO METADATA QUESTIONS. Focus strictly on the substance of insurance principles.
+    3. Generate 4 plausible options (A, B, C, D).
+    4. Ensure exactly ONE option is unambiguously correct according to the 'Provided Text Context'.
+    5. Incorrect options must be relevant but clearly wrong based *only* on the 'Provided Text Context'.
+    6. Output Format (EXACTLY as shown, using these precise labels and newlines, no extra markdown around labels):
     Question: [Your question here]
     A: [Option A text]
     B: [Option B text]
@@ -380,23 +554,121 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     Explanation: [Brief explanation from context.]
     Provided Text Context:\n---\n{context_to_send}\n---\nGenerate the question now.
     """ 
+    llm_response_obj = None; response_text = None; max_retries = 3; retry_delay = 5; parsed_data = None
     try:
-        response = model.generate_content(prompt, request_options={'timeout': 60}).text.strip()
-        parsed_data = {
-            "question": re.search(r"Question:\s*(.+)", response).group(1).strip(),
-            "options": {
-                "A": re.search(r"A:\s*(.+)", response).group(1).strip(),
-                "B": re.search(r"B:\s*(.+)", response).group(1).strip(),
-                "C": re.search(r"C:\s*(.+)", response).group(1).strip(),
-                "D": re.search(r"D:\s*(.+)", response).group(1).strip()
-            },
-            "correct_answer": re.search(r"Correct Answer:\s*([A-D])", response).group(1).strip(),
-            "explanation": re.search(r"Explanation:\s*(.+)", response, re.S).group(1).strip()
+        for attempt in range(max_retries):
+            try:
+                print(f"--- Terminal Log: Sending prompt to Gemini AI (Attempt {attempt + 1}/{max_retries}) ---")
+                safety_settings = { 
+                    genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                    genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                    genai.types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                    genai.types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: genai.types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+                }
+                llm_response_obj = model.generate_content(prompt, safety_settings=safety_settings, request_options={'timeout': 60}) 
+                print(f"--- Terminal Log: Received response from Gemini AI (Attempt {attempt + 1}) ---")
+                if llm_response_obj and llm_response_obj.candidates and hasattr(llm_response_obj.candidates[0].content, 'parts') and llm_response_obj.candidates[0].content.parts:
+                    response_text = llm_response_obj.candidates[0].content.parts[0].text.strip()
+                    if response_text: 
+                        print(f"--- Terminal Log: Got response text (Attempt {attempt + 1}). ---")
+                        break 
+                    else: 
+                        reason = llm_response_obj.candidates[0].finish_reason.name if llm_response_obj.candidates[0].finish_reason else "Empty content part"
+                        print(f"--- Terminal Log: AI Response Text Empty (Attempt {attempt + 1}). Reason: {reason} ---")
+                elif llm_response_obj and not llm_response_obj.candidates: 
+                    reason = llm_response_obj.prompt_feedback.block_reason.name if llm_response_obj.prompt_feedback and llm_response_obj.prompt_feedback.block_reason else "No candidates"
+                    print(f"--- Terminal Log: AI Response No Candidates (Attempt {attempt + 1}). Reason: {reason} ---")
+                else: 
+                    print(f"--- Terminal Log: AI Response Invalid/Null (Attempt {attempt + 1}) ---")
+                if attempt < max_retries - 1: 
+                    print(f"--- Terminal Log: Retrying LLM call in {retry_delay}s... ---")
+                    time.sleep(retry_delay)
+                else: 
+                    st.error(f"AI response issue after {max_retries} attempts.")
+                    return None, [] 
+            except Exception as e_api: 
+                print(f"--- Terminal Log: LLM API Error (Attempt {attempt + 1}/{max_retries}): {type(e_api).__name__}: {e_api} ---")
+                if attempt < max_retries - 1: 
+                    print(f"--- Terminal Log: Retrying LLM API call in {retry_delay}s... ---")
+                    time.sleep(retry_delay)
+                else: 
+                    raise e_api 
+        if not response_text: 
+            st.error("Failed to get valid response text from AI after retries.")
+            return None, [] 
+        
+        print(f"--- Terminal Log: Raw AI Response (first 200 chars): {response_text[:200]}... ---")
+        parsed_data = {}; options = {}
+        patterns = {
+            "question": r"^\**Question\**\s*[:\-]\s*(.+?)\s*(?=\n\s*\**\s*[A-Z]\s*[:\.\)]|\Z)",
+            "A": r"\n\s*\**\s*[Aa]\s*[:\.\)]\s*\**(.+?)\**\s*(?=\n\s*\**\s*[Bb]\s*[:\.\)]|\Z)",
+            "B": r"\n\s*\**\s*[Bb]\s*[:\.\)]\s*\**(.+?)\**\s*(?=\n\s*\**\s*[Cc]\s*[:\.\)]|\Z)",
+            "C": r"\n\s*\**\s*[Cc]\s*[:\.\)]\s*\**(.+?)\**\s*(?=\n\s*\**\s*[Dd]\s*[:\.\)]|\Z)",
+            "D": r"\n\s*\**\s*[Dd]\s*[:\.\)]\s*\**(.+?)\**\s*(?=\n\s*\**\s*Correct Answer\s*[:\.\)]|\Z)",
+            "correct_answer": r"\n\s*\**\s*Correct Answer\s*[:\.\)]\s*\**\s*\[?([A-Da-d])\]?\s*\**",
+            "explanation": r"\n\s*\**\s*Explanation\s*[:\.\)]\s*\**([\s\S]+?)\**\s*(\Z|\n\s*\**\s*(Question:|A:|B:|C:|D:|Correct Answer:))"
         }
+        def extract_with_pattern(key, pattern, text_to_search):
+            flags = re.IGNORECASE
+            if key == "explanation": flags |= re.DOTALL
+            match = re.search(pattern, text_to_search, flags)
+            if match: 
+                content = match.group(1).strip()
+                if key == "question": 
+                    content = re.sub(r'\.(?=[a-zA-Z0-9])', '. ', content) 
+                    content = re.sub(r'([a-zA-Z])([0-9])', r'\1 \2', content) 
+                    content = re.sub(r'([0-9])([a-zA-Z])', r'\1 \2', content)
+                    content = re.sub(r'([a-zA-Z0-9])(\()', r'\1 \2', content) 
+                    content = re.sub(r'(\))([a-zA-Z0-9])', r'\1 \2', content) 
+                    common_stuck_words = ['and', 'of', 'in', 'to', 'for', 'with', 'on', 'at', 'from', 'by', 'about', 
+                                          'million', 'thousand', 'hundred', 'dollar', 'dollars', 'euro', 'euros', 
+                                          'usd', 'eur', 'premium', 'policy', 'insurance', 'claim', 'risk']
+                    for word_to_space in common_stuck_words:
+                        content = re.sub(rf'([a-zA-Z0-9,\.]+)({re.escape(word_to_space)})([a-zA-Z0-9,\.]+)', rf'\1 \2 \3', content, flags=re.IGNORECASE)
+                        content = re.sub(rf'([a-zA-Z0-9,\.]+)({re.escape(word_to_space)})', rf'\1 \2', content, flags=re.IGNORECASE)
+                        content = re.sub(rf'({re.escape(word_to_space)})([a-zA-Z0-9,\.]+)', rf'\1 \2', content, flags=re.IGNORECASE)
+                    content = re.sub(r'\s{2,}', ' ', content).strip() 
+                return content
+            print(f"--- Terminal Log: Parsing Warning: Could not find '{key}' in response. ---")
+            return None
+        
+        parsed_data["question"] = extract_with_pattern("Question", patterns["question"], response_text)
+        options["A"] = extract_with_pattern("Option A", patterns["A"], response_text)
+        options["B"] = extract_with_pattern("Option B", patterns["B"], response_text)
+        options["C"] = extract_with_pattern("Option C", patterns["C"], response_text)
+        options["D"] = extract_with_pattern("Option D", patterns["D"], response_text)
+        parsed_data["options"] = {k: v for k, v in options.items() if v is not None} 
+        correct_ans_raw = extract_with_pattern("Correct Answer", patterns["correct_answer"], response_text)
+        if correct_ans_raw: parsed_data["correct_answer"] = correct_ans_raw.upper()
+        else: parsed_data["correct_answer"] = None 
+        parsed_data["explanation"] = extract_with_pattern("Explanation", patterns["explanation"], response_text)
+        
+        req_keys = ["question", "options", "correct_answer", "explanation"];
+        if not all(k in parsed_data and parsed_data[k] is not None for k in req_keys) or len(parsed_data.get("options", {})) != 4:
+            print(f"--- Terminal Log: PARSING FAILED. Data: {parsed_data}. Options count: {len(parsed_data.get('options', {}))}. ---")
+            raise ValueError("Parsing failed. Missing required parts or options incomplete.")
+        if parsed_data["correct_answer"] not in ["A", "B", "C", "D"]: 
+            print(f"--- Terminal Log: Invalid correct answer: '{parsed_data['correct_answer']}'. ---")
+            raise ValueError(f"Invalid correct answer: '{parsed_data['correct_answer']}'")
+        
+        print(f"--- Terminal Log: Successfully parsed question data. Indices: {original_context_indices}. ---")
         return parsed_data, original_context_indices 
-    except Exception as e:
+    
+    except ValueError as ve_parsing: 
+        print(f"--- Terminal Log: Parsing ValueError: {ve_parsing}. Raw response (first 500): '{response_text[:500] if response_text else 'None'}' ---")
+        st.error("AI response format issue."); 
+        traceback.print_exc()
+        return None, [] 
+    except Exception as e_overall: 
+        print(f"--- Terminal Log: Overall Q Gen Error: {type(e_overall).__name__}: {e_overall} ---")
+        safety_fb = "";
+        try: 
+            if llm_response_obj and hasattr(llm_response_obj, 'prompt_feedback') and llm_response_obj.prompt_feedback and hasattr(llm_response_obj.prompt_feedback, 'block_reason') and llm_response_obj.prompt_feedback.block_reason: safety_fb = f"Reason: {llm_response_obj.prompt_feedback.block_reason.name}"
+            elif llm_response_obj and llm_response_obj.candidates and hasattr(llm_response_obj.candidates[0], 'finish_reason') and llm_response_obj.candidates[0].finish_reason: safety_fb = f"Finish Reason: {llm_response_obj.candidates[0].finish_reason.name}"
+        except Exception as e_safety: print(f"--- Terminal Log: Error getting safety feedback: {e_safety} ---")
+        st.error(f"AI communication or processing error. {safety_fb}"); 
+        traceback.print_exc()
         return None, []
-
 
 # --- Main Application Logic Starts Here ---
 
@@ -415,14 +687,36 @@ if 'gemini_api_key' not in st.session_state: st.session_state.gemini_api_key = N
 try:
     if not st.session_state.llm_configured:
         if "GEMINI_API_KEY" not in st.secrets: 
+            print("--- TERMINAL DEBUG: GEMINI_API_KEY not found in st.secrets! ---")
             raise KeyError("API key not found in st.secrets")
+        
         st.session_state.gemini_api_key = st.secrets["GEMINI_API_KEY"]
+        if not st.session_state.gemini_api_key: 
+             print("--- TERMINAL DEBUG: GEMINI_API_KEY is present in secrets but is empty! ---")
+             raise ValueError("GEMINI_API_KEY value is empty in secrets.")
+
+        print(f"--- Terminal DEBUG: Configuring with API key ending: ...{st.session_state.gemini_api_key[-4:] if st.session_state.gemini_api_key and len(st.session_state.gemini_api_key) >=4 else 'KEY_IS_SHORT_EMPTY_OR_NONE'} ---")
         genai.configure(api_key=st.session_state.gemini_api_key)
+        print("--- Terminal DEBUG: genai.configure called. ---")
         st.session_state.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
+        print("--- Terminal DEBUG: GenerativeModel created. ---")
         st.session_state.llm_configured = True
-except Exception as e: 
-    st.error(f"AI Config Error: {e}") 
+        print("--- Terminal DEBUG: Gemini AI Configured successfully. ---")
+    else:
+        print("--- Terminal DEBUG: Gemini AI was already configured. ---")
+except KeyError as ke: 
+    error_message = f"Gemini Config Error: {ke} - Check secrets."
+    print(f"--- TERMINAL DEBUG: LLM Config KeyError: {error_message} ---")
+    traceback.print_exc() 
+    st.error(error_message) 
     st.session_state.llm_configured = False
+except Exception as e_gemini: 
+    error_message = f"AI Config Error: {e_gemini}"
+    print(f"--- TERMINAL DEBUG: LLM Config Exception: {error_message} ---")
+    traceback.print_exc() 
+    st.error(error_message) 
+    st.session_state.llm_configured = False
+
 
 # --- Initialize Session State ---
 st.session_state.setdefault('uploaded_file_key', None) 
@@ -473,9 +767,9 @@ if not st.session_state.get('show_summary', False) and \
         uploaded_file = uploaded_file_widget_result
     else:
         uploaded_file = st.session_state.get('uploaded_file_object_ref', None) 
-        # CAUSE OF BUG IDENTIFIED: If name had underscores, it wiped the file here.
+        # FIX 1: Use rsplit to safely handle files with underscores
         if uploaded_file and st.session_state.get('uploaded_file_key') and \
-           uploaded_file.name != st.session_state.get('uploaded_file_key','').split('_')[0] :
+           uploaded_file.name != st.session_state.get('uploaded_file_key','').rsplit('_', 1)[0] :
             uploaded_file = None 
             st.session_state.uploaded_file_object_ref = None
 else: 
@@ -487,10 +781,13 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
     needs_full_processing = False
     if st.session_state.get('uploaded_file_key') != current_file_key:
         needs_full_processing = True
+        print(f"--- New File Detected: {uploaded_file.name}. Triggering full processing and state reset. ---")
     elif not st.session_state.get('vector_store_setup_done', False):
         needs_full_processing = True
+        print(f"--- Same File ('{uploaded_file.name}'), but previous processing indicates setup was not completed. Retrying processing. ---")
     
     if needs_full_processing:
+        print("--- Resetting session states for new file processing. ---")
         st.session_state.uploaded_file_key = current_file_key
         st.session_state.substantive_chunks_for_quiz = None 
         st.session_state.doc_chunk_details = [] 
@@ -521,6 +818,7 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
             st.session_state.doc_chunk_details = [{"text": item['text'], "full_headings_list": item.get('headings', [])} for item in docling_output_list]
             st.session_state.substantive_chunks_for_quiz = [item['text'] for item in st.session_state.doc_chunk_details]
             st.session_state.faiss_index_chunks = st.session_state.substantive_chunks_for_quiz 
+            print(f"--- Post-Docling: Prepared {len(st.session_state.substantive_chunks_for_quiz)} chunks with details. ---")
 
             num_words_for_hover = 50
             st.session_state.chunk_hover_labels = [] 
@@ -548,6 +846,8 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
                     else: 
                         st.session_state.dynamic_doc_subject = CORE_SUBJECT
                         st.session_state.dynamic_doc_objective = "To learn about the provided content."
+                print(f"--- Dynamically Determined Subject (after processing): '{st.session_state.dynamic_doc_subject}' ---")
+                print(f"--- Dynamically Determined Objective (after processing): '{st.session_state.dynamic_doc_objective}' ---")
 
             if st.session_state.get('dynamic_doc_subject'):
                 st.session_state.current_doc_subject = st.session_state.dynamic_doc_subject
@@ -555,15 +855,25 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
                 st.session_state.current_doc_subject = uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ')
             else: 
                 st.session_state.current_doc_subject = CORE_SUBJECT
+            if not st.session_state.get('dynamic_doc_objective') and st.session_state.current_doc_subject != CORE_SUBJECT:
+                st.session_state.dynamic_doc_objective = f"To learn about {st.session_state.current_doc_subject}."
+            elif not st.session_state.get('dynamic_doc_objective'):
+                st.session_state.dynamic_doc_objective = "To understand general concepts."
             
             if st.session_state.substantive_chunks_for_quiz and st.session_state.llm_configured: 
                 with st.spinner(f"Building FAISS index for '{uploaded_file.name}'..."):
                     setup_success = setup_vector_store(st.session_state.substantive_chunks_for_quiz, st.session_state.gemini_api_key, uploaded_file.name)
                     st.session_state.vector_store_setup_done = setup_success
+                    if not setup_success:
+                        print(f"--- FAISS VS setup FAILED for {uploaded_file.name}. ---")
+            else:
+                print("--- Skipping FAISS setup: No substantive chunks from Docling or LLM not configured. ---")
+                st.session_state.vector_store_setup_done = False
         else: 
             st.session_state.vector_store_setup_done = False
     else: 
         if uploaded_file:
+            print(f"--- Document '{uploaded_file.name}' already processed and vector store setup. Using cached data. ---")
             if st.session_state.get('dynamic_doc_subject'):
                 st.session_state.current_doc_subject = st.session_state.dynamic_doc_subject
             elif st.session_state.current_doc_subject == CORE_SUBJECT:
@@ -575,25 +885,27 @@ if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode'
 
 # --- App Logic (Conditions for displaying quiz UI, summary, etc.) ---
 
-# FIX: Replaced 'uploaded_file is not None' with check for text chunks
+# FIX 2: Replaced 'uploaded_file is not None' with check for text chunks
 if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get('substantive_chunks_for_quiz'):
-    
-    # Optional styling header
+    if uploaded_file:
+        st.caption(f"Document: {uploaded_file.name}")
+        
     st.subheader(f"Focused Quiz on Topic from Document Section") 
-    
     if st.session_state.get('heatmap_quiz_source_chunk_idx') is not None:
          st.caption(f"Question based on content from document section related to chunk {st.session_state.heatmap_quiz_source_chunk_idx + 1}.")
 
     if not st.session_state.get('current_question_data'):
         with st.spinner("Generating focused question..."):
-            difficulty = "simpler" if st.session_state.get('heatmap_quiz_last_answer_incorrect') else "average"
-            prev_q = st.session_state.current_question_data.get('question') if st.session_state.get('heatmap_quiz_last_answer_incorrect') and st.session_state.get('current_question_data') else None
-            
+            difficulty_for_hm_q = "simpler" if st.session_state.get('heatmap_quiz_last_answer_incorrect', False) else "average"
+            prev_q_text_for_hm = None
+            if st.session_state.get('heatmap_quiz_last_answer_incorrect') and st.session_state.get('current_question_data'):
+                prev_q_text_for_hm = st.session_state.current_question_data.get('question')
+
             q_data, context_indices = generate_quiz_question(
                 model=st.session_state.gemini_model,
                 subject=st.session_state.current_doc_subject, 
-                difficulty=difficulty, 
-                previous_question_text=prev_q,
+                difficulty=difficulty_for_hm_q, 
+                previous_question_text=prev_q_text_for_hm,
                 all_doc_chunks=st.session_state.substantive_chunks_for_quiz,
                 focused_chunk_idx=st.session_state.heatmap_quiz_source_chunk_idx
             )
@@ -608,30 +920,46 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
         else:
             st.error("Failed to generate a question for this topic.")
             st.session_state.in_heatmap_quiz_mode = False
+            st.session_state.heatmap_quiz_source_chunk_idx = None
+            st.session_state.current_question_data = None 
             st.session_state.show_summary = True 
             st.rerun()
 
-    if st.session_state.get('current_question_data'):
+    if st.session_state.current_question_data:
         q_data = st.session_state.current_question_data
-        with st.container(border=True):
+        quiz_container = st.container(border=True)
+        with quiz_container:
             st.markdown(f"**{q_data['question']}**")
-            options_list = [f"{k}: {q_data['options'].get(k)}" for k in ["A","B","C","D"]]
+            options_dict = q_data.get("options", {})
+            options_list = [f"{k}: {options_dict.get(k, f'Err {k}')}" for k in ["A","B","C","D"] if k in options_dict]
+            
             idx = None
+            radio_key_suffix = str(st.session_state.get('heatmap_quiz_source_chunk_idx', 'na')) 
+            if q_data.get('question'): 
+                 radio_key_suffix += "_" + str(hash(q_data['question']))
+
             if st.session_state.show_explanation and st.session_state.user_answer:
                 try: idx = [opt.startswith(f"{st.session_state.user_answer}:") for opt in options_list].index(True)
-                except ValueError: pass
+                except ValueError: idx = None
             
-            selected_opt = st.radio("Select:", options_list, index=idx, disabled=st.session_state.show_explanation, label_visibility="collapsed")
-            if not st.session_state.show_explanation:
-                st.session_state.user_answer = selected_opt.split(":")[0] if selected_opt else None
+            selected_opt = st.radio("Select:", options_list, index=idx, key=f"hm_q_radio_{radio_key_suffix}", disabled=st.session_state.show_explanation, label_visibility="collapsed")
 
-            if st.button("Submit Answer", disabled=st.session_state.show_explanation):
-                if not st.session_state.user_answer:
+            if not st.session_state.show_explanation:
+                st.session_state.user_answer = selected_opt.split(":")[0] if selected_opt and ":" in selected_opt else None
+
+            submit_hm_q_button = st.button("Submit Answer", key="submit_hm_q_btn", disabled=st.session_state.show_explanation)
+
+            if submit_hm_q_button:
+                if st.session_state.user_answer is None:
                     st.warning("Please select an answer.")
                 else:
                     st.session_state.total_questions_answered += 1 
-                    correct = q_data.get("correct_answer")
-                    if st.session_state.user_answer == correct:
+                    correct = q_data.get("correct_answer", "Error")
+                    if correct == "Error":
+                        st.session_state.feedback_message = "Error: Could not determine correct answer."
+                        st.session_state.last_answer_correct = None
+                        st.session_state.heatmap_quiz_last_answer_incorrect = False 
+                    elif st.session_state.user_answer == correct:
                         st.session_state.feedback_message = "Correct!"
                         st.session_state.last_answer_correct = True
                         st.session_state.heatmap_quiz_last_answer_incorrect = False
@@ -640,7 +968,7 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
                         st.session_state.last_answer_correct = False
                         st.session_state.heatmap_quiz_last_answer_incorrect = True 
                         st.session_state.incorrectly_answered_questions.append({
-                            "question_number": f"Focused (Chunk {st.session_state.heatmap_quiz_source_chunk_idx + 1})",
+                            "question_number": f"Focused (Topic from chunk {st.session_state.heatmap_quiz_source_chunk_idx + 1})",
                             "question_text": q_data["question"],
                             "your_answer": st.session_state.user_answer,
                             "correct_answer": correct,
@@ -648,26 +976,31 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
                             "options_dict": q_data.get("options", {})
                         })
                     
-                    if st.session_state.heatmap_quiz_current_context_indices:
-                        for idx_status in st.session_state.heatmap_quiz_current_context_indices:
+                    context_indices_to_update = st.session_state.heatmap_quiz_current_context_indices 
+                    if context_indices_to_update and st.session_state.last_answer_correct is not None:
+                        for idx_status in context_indices_to_update:
                             if 0 <= idx_status < len(st.session_state.chunk_review_status):
-                                cs = st.session_state.chunk_review_status[idx_status]
+                                current_status = st.session_state.chunk_review_status[idx_status]
                                 if st.session_state.last_answer_correct: 
                                     st.session_state.chunk_review_status[idx_status] = 1 
                                 else: 
-                                    if cs in [0, 1, 4]: st.session_state.chunk_review_status[idx_status] = 2 
-                                    elif cs == 2: st.session_state.chunk_review_status[idx_status] = 3
+                                    if current_status in [0, 1, 4]: 
+                                        st.session_state.chunk_review_status[idx_status] = 2 
+                                    elif current_status == 2: 
+                                        st.session_state.chunk_review_status[idx_status] = 3
+                                print(f"--- Terminal Log: Heatmap Quiz - Chunk {idx_status} status updated to {st.session_state.chunk_review_status[idx_status]} ---")
                     
                     st.session_state.show_explanation = True
                     st.rerun()
 
             if st.session_state.show_explanation:
-                if st.session_state.last_answer_correct: st.success(st.session_state.feedback_message)
-                else: st.error(st.session_state.feedback_message)
+                if st.session_state.feedback_message:
+                    if st.session_state.last_answer_correct: st.success(st.session_state.feedback_message)
+                    else: st.error(st.session_state.feedback_message)
                 st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
 
                 if st.session_state.last_answer_correct:
-                    if st.button("Back to Quiz Summary"):
+                    if st.button("Back to Quiz Summary", key="hm_q_correct_to_summary_btn"):
                         st.session_state.in_heatmap_quiz_mode = False
                         st.session_state.heatmap_quiz_source_chunk_idx = None
                         st.session_state.current_question_data = None
@@ -675,17 +1008,20 @@ if st.session_state.get('in_heatmap_quiz_mode', False) and st.session_state.get(
                         st.session_state.heatmap_quiz_last_answer_incorrect = False
                         st.rerun()
                 else: 
-                    if st.button("Try Another Question on this Topic"):
-                        st.session_state.current_question_data = None 
-                        st.session_state.show_explanation = False
-                        st.rerun()
+                    if st.session_state.last_answer_correct is False : 
+                        if st.button("Try Another Question on this Topic", key="hm_q_retry_topic_btn"):
+                            st.session_state.current_question_data = None 
+                            st.session_state.show_explanation = False
+                            st.session_state.feedback_message = None
+                            st.rerun()
             
             st.divider()
-            if st.button("End Focused Quiz & View Summary"):
+            if st.button("End Focused Quiz & View Summary", key="hm_q_stop_summary_btn"):
                 st.session_state.in_heatmap_quiz_mode = False
                 st.session_state.heatmap_quiz_source_chunk_idx = None
                 st.session_state.current_question_data = None 
                 st.session_state.show_summary = True
+                st.session_state.heatmap_quiz_last_answer_incorrect = False
                 st.rerun()
 
 elif st.session_state.get('show_summary', False):
@@ -699,7 +1035,8 @@ elif st.session_state.get('show_summary', False):
     num_incorrect = len(incorrect_list)
     num_correct = total_answered - num_incorrect
     col1, col2 = st.columns([1, 3])
-    with col1: st.metric(label="Score", value=f"{(num_correct / total_answered * 100):.1f}%" if total_answered > 0 else "N/A")
+    with col1:
+        st.metric(label="Score", value=f"{(num_correct / total_answered * 100):.1f}%" if total_answered > 0 else "N/A")
     with col2:
         st.write(f"**Total Questions Answered:** {total_answered}")
         st.write(f"**Correct:** {num_correct}, **Incorrect:** {num_incorrect}")
@@ -711,60 +1048,103 @@ elif st.session_state.get('show_summary', False):
         with st.expander("Review Topics for Incorrect Answers"): 
             for item in incorrect_list:
                 st.error(f"**Q{item['question_number']}: {item['question_text']}**")
-                st.write(f"> Your Answer: **{item['your_answer']}**. {item['options_dict'].get(item['your_answer'], '')}")
-                st.write(f"> Correct Answer: **{item['correct_answer']}**. {item['options_dict'].get(item['correct_answer'], '')}")
+                options_for_item = item.get("options_dict", {})
+                your_answer_letter = item.get('your_answer', 'N/A')
+                correct_answer_letter = item.get('correct_answer', 'N/A')
+                your_answer_text = options_for_item.get(your_answer_letter, f"'{your_answer_letter}' (Text not found)")
+                correct_answer_text = options_for_item.get(correct_answer_letter, f"'{correct_answer_letter}' (Text not found)")
+                st.write(f"> Your Answer: **{your_answer_letter}**. {your_answer_text}")
+                st.write(f"> Correct Answer: **{correct_answer_letter}**. {correct_answer_text}")
                 st.caption(f"Explanation: {item.get('explanation', 'N/A')}")
                 st.markdown("---")
     elif total_answered == 0:
         st.info("No questions were answered in this session.")
     st.divider() 
     
-    # Detail Expander
-    if st.session_state.get('show_heatmap_chunk_detail', False) and st.session_state.get('selected_heatmap_chunk_index') is not None:
-        idx = st.session_state.selected_heatmap_chunk_index
-        doc_chunk_details = st.session_state.get('doc_chunk_details', []) 
-        if 0 <= idx < len(doc_chunk_details):
-            chunk_info = doc_chunk_details[idx]
-            path_title = " -> ".join(chunk_info.get("full_headings_list", [])) or "General Content"
-            with st.expander(f"Path: {path_title} (Paragraph {idx + 1})", expanded=True): 
-                st.markdown(f"<p style='line-height: 1.3;'><b>{chunk_info.get('text')}</b></p>", unsafe_allow_html=True)
+    # Chunk Detail Expander - Placed before the heatmap's own expander
+    if st.session_state.get('show_heatmap_chunk_detail', False) and \
+       st.session_state.get('selected_heatmap_chunk_index') is not None:
+        selected_idx = st.session_state.selected_heatmap_chunk_index
+        doc_chunk_details_list_summary = st.session_state.get('doc_chunk_details', []) 
+
+        if 0 <= selected_idx < len(doc_chunk_details_list_summary):
+            chunk_info = doc_chunk_details_list_summary[selected_idx]
+            full_headings_str_for_title = " -> ".join(chunk_info.get("full_headings_list", [])) if chunk_info.get("full_headings_list") else "General Content"
+            display_texts = []
+            current_chunk_headings_tuple = tuple(chunk_info.get("full_headings_list", []))
+
+            if selected_idx > 0:
+                prev_chunk_info = doc_chunk_details_list_summary[selected_idx - 1]
+                if tuple(prev_chunk_info.get("full_headings_list", [])) == current_chunk_headings_tuple:
+                    display_texts.append(prev_chunk_info.get("text", "Error: Prev text missing"))
+                    if chunk_info.get("text"): display_texts.append("---") 
+            current_text = chunk_info.get('text', 'Error: Current text missing')
+            display_texts.append(f"<b>{current_text}</b>")
+            if selected_idx < len(doc_chunk_details_list_summary) - 1:
+                next_chunk_info = doc_chunk_details_list_summary[selected_idx + 1]
+                if tuple(next_chunk_info.get("full_headings_list", [])) == current_chunk_headings_tuple:
+                    if chunk_info.get("text"): display_texts.append("---")
+                    display_texts.append(next_chunk_info.get("text", "Error: Next text missing"))
+            
+            expander_label_detail = f"Path: {full_headings_str_for_title} (Context for Paragraph Index {selected_idx + 1})"
+            with st.expander(expander_label_detail, expanded=True): 
+                content_html = ""
+                first_text_segment_in_expander = True 
+                for i, text_segment in enumerate(display_texts):
+                    if text_segment == "---":
+                        if not first_text_segment_in_expander: 
+                            content_html += "<hr style='margin-top: 2px; margin-bottom: 2px; border-top: 1px solid #eee;'>" 
+                    else:
+                        content_html += f"<p style='margin-top: 2px; margin-bottom: 2px; line-height: 1.3;'>{text_segment}</p>"
+                    if text_segment != "---":
+                        first_text_segment_in_expander = False
+                st.markdown(content_html, unsafe_allow_html=True)
+                
                 col1_exp, col2_exp = st.columns(2)
                 with col1_exp:
-                    if st.button("Quiz me on this chunk"): 
+                    if st.button("Quiz me on this chunk", key=f"quiz_me_btn_summary_{selected_idx}"): 
                         st.session_state.in_heatmap_quiz_mode = True
-                        st.session_state.heatmap_quiz_source_chunk_idx = idx
+                        st.session_state.heatmap_quiz_source_chunk_idx = selected_idx
                         st.session_state.current_question_data = None 
                         st.session_state.quiz_started = False 
                         st.session_state.show_summary = False 
                         st.session_state.show_heatmap_chunk_detail = False 
                         st.rerun()
                 with col2_exp:
-                    if st.button("Close Detail"): 
+                    if st.button("Close Detail", key=f"close_detail_exp_summary_{selected_idx}"): 
                         st.session_state.show_heatmap_chunk_detail = False
                         st.session_state.selected_heatmap_chunk_index = None
                         st.rerun()
+        else: 
+            st.session_state.show_heatmap_chunk_detail = False
+            st.session_state.selected_heatmap_chunk_index = None
     
     with st.expander("📘 Document Coverage & Performance Heatmap"): 
         display_heatmap_grid() 
     
     st.divider()
-    if st.button("Start New Quiz Once More"):
+    if st.button("Start New Quiz Once More", key="start_new_quiz_summary"):
         st.session_state.quiz_started = False
         st.session_state.question_number = 0 
         st.session_state.current_question_data = None
         st.session_state.user_answer = None
+        st.session_state.feedback_message = None
         st.session_state.show_explanation = False
+        st.session_state.last_answer_correct = None
         st.session_state.incorrectly_answered_questions = []
         st.session_state.total_questions_answered = 0
         st.session_state.show_summary = False
         st.session_state.in_heatmap_quiz_mode = False 
+        st.session_state.heatmap_quiz_source_chunk_idx = None
         if st.session_state.get('substantive_chunks_for_quiz'):
-            st.session_state.available_chunk_indices = list(range(len(st.session_state.substantive_chunks_for_quiz)))
+            num_chunks = len(st.session_state.substantive_chunks_for_quiz)
+            st.session_state.available_chunk_indices = list(range(num_chunks))
             random.shuffle(st.session_state.available_chunk_indices)
-            st.session_state.chunk_review_status = [0] * len(st.session_state.substantive_chunks_for_quiz)
+            st.session_state.chunk_review_status = [0] * num_chunks
+        st.session_state.current_question_context_indices = []
         st.rerun()
 
-# FIX: Replaced 'uploaded_file is not None' with check for text chunks
+# FIX 3: Replaced 'uploaded_file is not None' with check for text chunks
 elif st.session_state.get('vector_store_setup_done') and \
      st.session_state.get('substantive_chunks_for_quiz') and \
      st.session_state.llm_configured and \
@@ -782,14 +1162,25 @@ elif st.session_state.get('vector_store_setup_done') and \
     if st.button("Start Quiz!", type="primary", key="start_quiz_main_btn"): 
         st.session_state.quiz_started = True
         st.session_state.question_number = 1
+        st.session_state.feedback_message = None 
         st.session_state.show_explanation = False
+        st.session_state.last_answer_correct = None
         st.session_state.user_answer = None
         st.session_state.current_question_data = None 
         st.session_state.incorrectly_answered_questions = []
         st.session_state.total_questions_answered = 0
+        st.session_state.current_question_context_indices = []
         st.session_state.show_summary = False
         st.session_state.in_heatmap_quiz_mode = False 
+        doc_subject_for_q1 = st.session_state.get('dynamic_doc_subject', CORE_SUBJECT)
+        if not doc_subject_for_q1 or doc_subject_for_q1 == CORE_SUBJECT:
+            if uploaded_file:
+                doc_subject_for_q1 = uploaded_file.name.rsplit('.', 1)[0].replace('_', ' ').replace('-', ' ')
+            else: doc_subject_for_q1 = CORE_SUBJECT
+        st.session_state.current_doc_subject = doc_subject_for_q1
         
+        print(f"--- Start Quiz Clicked. Using Subject for Q1: '{st.session_state.current_doc_subject}' ---") 
+
         with st.spinner("Generating first question..."):
             q_data, context_indices = generate_quiz_question(
                 model=st.session_state.gemini_model, 
@@ -804,85 +1195,94 @@ elif st.session_state.get('vector_store_setup_done') and \
         else: 
             st.error("Failed to generate Q1. Please try starting the quiz again.")
             st.session_state.quiz_started = False 
+            st.session_state.question_number = 0
 
-# FIX: Replaced 'uploaded_file is not None' with check for text chunks
+# FIX 4: Replaced 'uploaded_file is not None' with check for text chunks
 elif st.session_state.get('quiz_started', False) and st.session_state.get('substantive_chunks_for_quiz'):
-    if uploaded_file: st.caption(f"Document: {uploaded_file.name}")
+    if uploaded_file:
+        st.caption(f"Document: {uploaded_file.name}")
 
-    with st.container(border=True):
+    quiz_container = st.container(border=True)
+    with quiz_container:
         if st.session_state.current_question_data:
-            q_data = st.session_state.current_question_data
-            st.subheader(f"Question {st.session_state.question_number}")
-            st.markdown(f"**{q_data['question']}**")
-            options_list = [f"{k}: {q_data['options'].get(k)}" for k in ["A","B","C","D"]]
+            q_data = st.session_state.current_question_data; doc_subject = st.session_state.current_doc_subject
+            st.subheader(f"Question {st.session_state.question_number}"); st.markdown(f"**{q_data['question']}**")
+            options_dict = q_data.get("options", {}); 
+            options_list = [f"{k}: {options_dict.get(k, f'Err {k}')}" for k in ["A","B","C","D"] if k in options_dict]
             idx = None
             if st.session_state.show_explanation and st.session_state.user_answer:
                 try: idx = [opt.startswith(f"{st.session_state.user_answer}:") for opt in options_list].index(True)
-                except ValueError: pass 
-
-            selected_opt = st.radio("Select:", options_list, index=idx, disabled=st.session_state.show_explanation, label_visibility="collapsed")
-            if not st.session_state.show_explanation: 
-                st.session_state.user_answer = selected_opt.split(":")[0] if selected_opt else None
-
-            st.write("---")
-            if st.button("Submit Answer", disabled=st.session_state.show_explanation, type="primary" if not st.session_state.show_explanation else "secondary"):
-                if not st.session_state.user_answer: st.warning("Select answer."); st.stop()
-                
-                st.session_state.total_questions_answered += 1
-                correct = q_data.get("correct_answer")
-                if st.session_state.user_answer == correct:
-                    st.session_state.feedback_message = "Correct!"
-                    st.session_state.last_answer_correct = True
-                else: 
-                    st.session_state.feedback_message = f"Incorrect. Correct: **{correct}**."
-                    st.session_state.last_answer_correct = False
-                    st.session_state.incorrectly_answered_questions.append({
-                        "question_number": st.session_state.question_number, 
-                        "question_text": q_data["question"], 
-                        "your_answer": st.session_state.user_answer, 
-                        "correct_answer": correct, 
-                        "explanation": q_data.get("explanation", "N/A"),
-                        "options_dict": q_data.get("options", {}) 
-                    })
-                
-                if st.session_state.current_question_context_indices:
-                    for idx_status in st.session_state.current_question_context_indices: 
-                        if 0 <= idx_status < len(st.session_state.chunk_review_status):
-                            cs = st.session_state.chunk_review_status[idx_status]
-                            if st.session_state.last_answer_correct: 
-                                if cs == 0 or cs == 4: st.session_state.chunk_review_status[idx_status] = 1
-                            else: 
-                                if cs in [0, 1, 4]: st.session_state.chunk_review_status[idx_status] = 2 
-                                elif cs == 2: st.session_state.chunk_review_status[idx_status] = 3
-                st.session_state.show_explanation = True
-                st.rerun()
-
-            if st.session_state.show_explanation:
-                if st.session_state.last_answer_correct: st.success(st.session_state.feedback_message)
-                else: st.error(st.session_state.feedback_message)
-                st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
-            
+                except ValueError: idx = None 
+            selected_opt = st.radio("Select:", options_list, index=idx, key=f"q_{st.session_state.question_number}", disabled=st.session_state.show_explanation, label_visibility="collapsed")
+            if not st.session_state.show_explanation: st.session_state.user_answer = selected_opt.split(":")[0] if selected_opt and ":" in selected_opt else None
+            st.write("---"); submit_btn_type = "primary" if not st.session_state.show_explanation else "secondary"; submit_btn = st.button("Submit Answer", disabled=st.session_state.show_explanation, type=submit_btn_type)
+            if submit_btn:
+                if st.session_state.user_answer is None: st.warning("Select answer."); st.stop()
+                else:
+                    st.session_state.total_questions_answered += 1; correct = q_data.get("correct_answer", "Error")
+                    if correct == "Error": st.session_state.feedback_message = "Error"; st.session_state.last_answer_correct = None
+                    elif st.session_state.user_answer == correct: st.session_state.feedback_message = "Correct!"; st.session_state.last_answer_correct = True
+                    else: 
+                        st.session_state.feedback_message = f"Incorrect. Correct: **{correct}**."
+                        st.session_state.last_answer_correct = False
+                        st.session_state.incorrectly_answered_questions.append({
+                            "question_number": st.session_state.question_number, 
+                            "question_text": q_data["question"], 
+                            "your_answer": st.session_state.user_answer, 
+                            "correct_answer": correct, 
+                            "explanation": q_data.get("explanation", "N/A"),
+                            "options_dict": q_data.get("options", {}) 
+                        })
+                    if st.session_state.current_question_context_indices and st.session_state.last_answer_correct is not None and hasattr(st.session_state, 'chunk_review_status') and st.session_state.chunk_review_status:
+                        for idx_status in st.session_state.current_question_context_indices: 
+                            if 0 <= idx_status < len(st.session_state.chunk_review_status):
+                                current_status = st.session_state.chunk_review_status[idx_status]
+                                if st.session_state.last_answer_correct: 
+                                    if current_status == 0 or current_status == 4: 
+                                        st.session_state.chunk_review_status[idx_status] = 1
+                                else: 
+                                    if current_status in [0, 1, 4]: 
+                                        st.session_state.chunk_review_status[idx_status] = 2 
+                                    elif current_status == 2: 
+                                        st.session_state.chunk_review_status[idx_status] = 3
+                                print(f"--- Terminal Log: Chunk index {idx_status} (quiz): old status {current_status}, new status {st.session_state.chunk_review_status[idx_status]} ---")
+                    st.session_state.show_explanation = True; st.rerun()
+            feedback_container = st.container()
+            with feedback_container:
+                if st.session_state.feedback_message:
+                    if st.session_state.last_answer_correct is True: st.success(st.session_state.feedback_message)
+                    elif st.session_state.last_answer_correct is False: st.error(st.session_state.feedback_message)
+                    else: st.warning(st.session_state.feedback_message)
+                    if st.session_state.show_explanation: st.caption(f"Explanation: {q_data.get('explanation', 'N/A')}")
             if st.button("Next Question"):
-                diff = "harder" if st.session_state.last_answer_correct else "simpler"
-                st.session_state.show_explanation = False
-                st.session_state.user_answer = None
-                with st.spinner("Moving to next section..." if st.session_state.last_answer_correct else "Revisiting topic..."):
-                    next_q, ctx_idx = generate_quiz_question(
-                        model=st.session_state.gemini_model, subject=st.session_state.current_doc_subject, 
-                        difficulty=diff, previous_question_text=q_data['question'], 
+                spinner_message = "Moving to a new section..." if st.session_state.last_answer_correct else "Revisiting this topic..."
+                difficulty_for_next_q = "harder" if st.session_state.last_answer_correct else "simpler"
+                st.session_state.feedback_message = None; st.session_state.show_explanation = False
+                st.session_state.user_answer = None; st.session_state.last_answer_correct = None
+                with st.spinner(spinner_message):
+                    next_q, context_indices = generate_quiz_question(
+                        model=st.session_state.gemini_model, subject=doc_subject, 
+                        difficulty=difficulty_for_next_q, previous_question_text=q_data['question'], 
                         all_doc_chunks=st.session_state.substantive_chunks_for_quiz
                     )
                 if next_q: 
                     st.session_state.current_question_data = next_q
-                    st.session_state.current_question_context_indices = ctx_idx
+                    st.session_state.current_question_context_indices = context_indices
                     st.session_state.question_number += 1
                     st.rerun()
-            
+                else: st.error(f"Failed to generate next question (type: {difficulty_for_next_q}). Please try again or stop quiz.")
             st.divider()
             if st.button("Stop Quiz"): 
-                st.session_state.show_summary = True
-                st.session_state.quiz_started = False
+                st.session_state.show_summary = True; st.session_state.quiz_started = False; 
+                st.session_state.in_heatmap_quiz_mode = False 
+                st.session_state.heatmap_quiz_source_chunk_idx = None
+                st.session_state.show_heatmap_chunk_detail = False 
+                st.session_state.selected_heatmap_chunk_index = None  
                 st.rerun()
+        else:
+            st.error("Quiz active, but no question data. Error? Stop/restart.")
+            if st.button("Stop Quiz (Error State)"): 
+                st.session_state.quiz_started = False; st.session_state.show_summary = True; st.rerun()
 
 else: 
     if uploaded_file is None and st.session_state.llm_configured :
@@ -902,3 +1302,5 @@ else:
         elif uploaded_file is None and not (st.session_state.get('show_summary', False) or st.session_state.get('quiz_started', False) or st.session_state.get('in_heatmap_quiz_mode', False)):
             data_privacy_explanation = "To provide quiz features, this application processes your uploaded document. Snippets of your document are sent to Google's Generative AI services to generate relevant content. Google's API policies state that this data is not used to train their general models. No original documents are stored by this application after your session ends."
             st.markdown("Data Privacy", help=data_privacy_explanation)
+        else:
+            pass
