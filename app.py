@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Context Anchor Fix)
+# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Router Fix)
 
 import streamlit as st
 
@@ -701,27 +701,29 @@ for k, v in defaults.items():
 # ---- EXPLICIT PAGE ROUTER (Executed exactly once per interaction) ----
 # ==========================================================================
 
+has_chunks = st.session_state.get('substantive_chunks_for_quiz') is not None
+
 # 1. HEATMAP FOCUSED QUIZ
-if st.session_state.in_heatmap_quiz_mode and st.session_state.substantive_chunks_for_quiz:
-    show_heatmap_quiz_mode(st.session_state.uploaded_file_object_ref)
+if st.session_state.get('in_heatmap_quiz_mode') and has_chunks:
+    show_heatmap_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
     st.stop()
 
 # 2. SUMMARY SCREEN
-if st.session_state.show_summary and st.session_state.substantive_chunks_for_quiz:
+if st.session_state.get('show_summary') and has_chunks:
     st.title("Quiz Summary")
-    show_summary_mode(st.session_state.uploaded_file_object_ref)
+    show_summary_mode(st.session_state.get('uploaded_file_object_ref'))
     st.stop()
 
 # 3. NORMAL QUIZ
-if st.session_state.quiz_started and st.session_state.substantive_chunks_for_quiz:
+if st.session_state.get('quiz_started') and has_chunks:
     st.title("AI Quiz Tutor")
-    show_normal_quiz_mode(st.session_state.uploaded_file_object_ref)
+    show_normal_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
     st.stop()
 
 # 4. READY SCREEN (Doc uploaded, not started yet)
-if st.session_state.substantive_chunks_for_quiz and st.session_state.vector_store_setup_done:
+if has_chunks and st.session_state.get('vector_store_setup_done'):
     st.title("AI Quiz Tutor")
-    show_ready_screen(st.session_state.uploaded_file_object_ref)
+    show_ready_screen(st.session_state.get('uploaded_file_object_ref'))
     st.stop()
 
 # 5. DEFAULT HOME SCREEN / UPLOADER
