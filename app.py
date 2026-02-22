@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Safe State)
+# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Context Anchor Fix)
 
 import streamlit as st
 
@@ -227,17 +227,34 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     doc_objective = st.session_state.get('dynamic_doc_objective', "To help the reader understand the provided text.")
     original_context_indices = [] 
     
-    if focused_chunk_idx is not None and faiss_index is not None and (0 <= focused_chunk_idx < len(all_doc_chunks)):
+    # ---------------------------------------------------------
+    # FIXED: Hard Anchor to Focused Chunk
+    # ---------------------------------------------------------
+    if focused_chunk_idx is not None and (0 <= focused_chunk_idx < len(all_doc_chunks)):
         try:
-            query_emb = genai.embed_content(model=EMBEDDING_MODEL, content=all_doc_chunks[focused_chunk_idx], task_type="RETRIEVAL_QUERY")['embedding']
-            distances, faiss_indices_ret = faiss_index.search(np.array(query_emb).astype('float32').reshape(1, -1), k=NUM_CHUNKS_TO_FETCH_SEMANTICALLY+1)
-            final_context_indices = [focused_chunk_idx]
-            for idx in faiss_indices_ret[0]:
-                if len(final_context_indices) >= NUM_CONTEXT_CHUNKS_TO_USE: break
-                if idx != focused_chunk_idx and idx not in final_context_indices and 0 <= idx < len(all_doc_chunks):
-                    final_context_indices.append(idx)
-            original_context_indices = final_context_indices
-        except: original_context_indices = [focused_chunk_idx]
+            original_context_indices = [focused_chunk_idx]
+
+            if faiss_index is not None:
+                query_emb = genai.embed_content(
+                    model=EMBEDDING_MODEL,
+                    content=all_doc_chunks[focused_chunk_idx],
+                    task_type="RETRIEVAL_QUERY"
+                )['embedding']
+
+                distances, faiss_indices_ret = faiss_index.search(
+                    np.array(query_emb).astype('float32').reshape(1, -1),
+                    k=NUM_CONTEXT_CHUNKS_TO_USE
+                )
+
+                for idx in faiss_indices_ret[0]:
+                    if idx != focused_chunk_idx and idx not in original_context_indices and 0 <= idx < len(all_doc_chunks):
+                        original_context_indices.append(int(idx))
+                    if len(original_context_indices) >= NUM_CONTEXT_CHUNKS_TO_USE:
+                        break
+
+        except Exception:
+            original_context_indices = [focused_chunk_idx]
+            
     elif not previous_question_text: 
         if not st.session_state.available_chunk_indices:
             st.session_state.available_chunk_indices = list(range(len(all_doc_chunks)))
@@ -249,7 +266,7 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
         try:
             query_emb = genai.embed_content(model=EMBEDDING_MODEL, content=previous_question_text, task_type="RETRIEVAL_QUERY")['embedding']
             distances, faiss_indices_ret = faiss_index.search(np.array(query_emb).astype('float32').reshape(1, -1), k=NUM_CONTEXT_CHUNKS_TO_USE)
-            original_context_indices = [i for i in faiss_indices_ret[0] if 0 <= i < len(all_doc_chunks)]
+            original_context_indices = [int(i) for i in faiss_indices_ret[0] if 0 <= i < len(all_doc_chunks)]
         except: original_context_indices = st.session_state.get('current_question_context_indices', [])
     
     if not original_context_indices:
@@ -302,6 +319,7 @@ def show_heatmap_quiz_mode(uploaded_file):
 
     if not st.session_state.get('current_question_data'):
         with st.spinner("Generating focused question..."):
+            # The difficulty string no longer dictates the context behavior for focused chunks
             difficulty = "simpler" if st.session_state.get('heatmap_quiz_last_answer_incorrect') else "average"
             prev_q = st.session_state.current_question_data.get('question') if st.session_state.get('heatmap_quiz_last_answer_incorrect') and st.session_state.get('current_question_data') else None
             
@@ -642,7 +660,7 @@ except Exception as e:
     st.error(f"AI Config Error. Check API key setup in secrets: {e}") 
 
 # --------------------------------------------------------------------------
-# SAFE SESSION STATE INITIALIZATION (The Missing Key Fix)
+# SAFE SESSION STATE INITIALIZATION 
 # --------------------------------------------------------------------------
 defaults = {
     "uploaded_file_key": None,
