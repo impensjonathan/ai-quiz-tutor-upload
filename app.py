@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Hard Backup Recovery)
+# app.py
 
 import streamlit as st
 
@@ -149,6 +149,66 @@ def process_document_with_docling(file_bytes, filename):
     except Exception as e:
         st.error(f"Docling Processing Error: {e}")
         return None
+
+def generate_chunk_labels(chunks_list, llm_model, prompt_batch_size=5, inter_batch_delay_seconds=4):
+    if not chunks_list: 
+        return [""] * len(chunks_list) 
+    all_labels = []
+    num_total_chunks = len(chunks_list)
+    num_batches = (num_total_chunks + prompt_batch_size - 1) // prompt_batch_size
+    progress_text = "Generating descriptive labels for document sections..."
+    label_progress_bar = st.progress(0, text=f"{progress_text} (Batch 0/{num_batches})")
+    for i in range(num_batches):
+        batch_start_index = i * prompt_batch_size
+        batch_end_index = min((i + 1) * prompt_batch_size, num_total_chunks)
+        current_batch_chunks_texts = chunks_list[batch_start_index:batch_end_index]
+        if not current_batch_chunks_texts: continue
+        prompt_for_batch = "For each of the following numbered paragraphs, provide a very concise topic label (ideally 2-4 words) that best describes its main content. Each label should be suitable for a heatmap display. Focus on the most specific subject matter of each paragraph. Avoid generic phrases like 'paragraph content' or 'text excerpt'.\n\n"
+        for idx_in_batch, chunk_text in enumerate(current_batch_chunks_texts):
+            max_label_chunk_chars = 750 
+            truncated_chunk_text = chunk_text[:max_label_chunk_chars]
+            if len(chunk_text) > max_label_chunk_chars:
+                truncated_chunk_text += "..."
+            prompt_for_batch += f"Paragraph {idx_in_batch + 1}:\n---\n{truncated_chunk_text}\n---\n\n"
+        prompt_for_batch += f"Output the labels in this exact format, each on a new line, numbered starting from 1 (e.g., '1: Label for Paragraph 1', '2: Label for Paragraph 2', etc. up to '{len(current_batch_chunks_texts)}:' ):"
+        batch_generated_labels = []
+        try:
+            for attempt in range(2): 
+                label_response = llm_model.generate_content(prompt_for_batch, request_options={'timeout': 90}) 
+                if label_response and label_response.text:
+                    raw_labels_text = label_response.text.strip()
+                    temp_labels_for_batch = {} 
+                    for line in raw_labels_text.splitlines():
+                        match = re.match(r"^\s*(\d+)\s*[:\-]\s*(.+)", line)
+                        if match:
+                            label_num = int(match.group(1))
+                            label_text = match.group(2).strip().replace("\"", "").replace("'", "")
+                            label_text = " ".join(label_text.split())[:50] 
+                            if label_text: temp_labels_for_batch[label_num] = label_text
+                    processed_all_in_batch = True
+                    for k_idx in range(len(current_batch_chunks_texts)):
+                        if (k_idx + 1) not in temp_labels_for_batch:
+                            processed_all_in_batch = False; break
+                    if processed_all_in_batch:
+                        for k_idx in range(len(current_batch_chunks_texts)):
+                            batch_generated_labels.append(temp_labels_for_batch[k_idx+1])
+                        break 
+                    else: 
+                        batch_generated_labels = [] 
+                if attempt < 1: 
+                    time.sleep(inter_batch_delay_seconds * 2) 
+        except Exception:
+            pass
+        if len(batch_generated_labels) != len(current_batch_chunks_texts):
+            batch_generated_labels = [f"Chunk {batch_start_index + k + 1}" for k in range(len(current_batch_chunks_texts))]
+        all_labels.extend(batch_generated_labels)
+        label_progress_bar.progress(float((i + 1) / num_batches), text=f"{progress_text} (Batch {i+1}/{num_batches} processed)")
+        if i < num_batches - 1: 
+            time.sleep(inter_batch_delay_seconds)
+    label_progress_bar.empty()
+    if len(all_labels) != num_total_chunks:
+        all_labels.extend([f"Chunk {len(all_labels) + k + 1}" for k in range(num_total_chunks - len(all_labels))])
+    return all_labels[:num_total_chunks]
 
 def display_heatmap_grid(): 
     st.subheader("📘 Document Coverage & Performance Heatmap")
@@ -304,9 +364,9 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
 # ---- UI PAGE RENDER FUNCTIONS ----
 # ==========================================================================
 
-def show_heatmap_quiz_mode(uploaded_file):
-    if uploaded_file: st.caption(f"Document: {uploaded_file.name}")
-    st.subheader(f"Focused Quiz on Topic from Document Section") 
+def show_heatmap_quiz_mode():
+    st.title("AI Quiz Tutor")
+    st.subheader("Focused Quiz on Topic from Document Section") 
     
     if st.session_state.get('heatmap_quiz_source_chunk_idx') is not None:
          st.caption(f"Question based on content from document section related to chunk {st.session_state.heatmap_quiz_source_chunk_idx + 1}.")
@@ -334,9 +394,11 @@ def show_heatmap_quiz_mode(uploaded_file):
             st.rerun()
         else:
             st.error("Failed to generate a question for this topic.")
-            st.session_state.in_heatmap_quiz_mode = False
-            st.session_state.show_summary = True 
-            st.rerun()
+            if st.button("Return to Summary"):
+                st.session_state.in_heatmap_quiz_mode = False
+                st.session_state.show_summary = True 
+                st.rerun()
+            st.stop()
 
     if st.session_state.get('current_question_data'):
         q_data = st.session_state.current_question_data
@@ -415,9 +477,8 @@ def show_heatmap_quiz_mode(uploaded_file):
                 st.session_state.show_summary = True
                 st.rerun()
 
-def show_summary_mode(uploaded_file):
-    if uploaded_file: st.caption(f"Document: {uploaded_file.name}")
-
+def show_summary_mode():
+    st.title("Quiz Summary")
     total_answered = st.session_state.total_questions_answered
     incorrect_list = st.session_state.incorrectly_answered_questions
     num_incorrect = len(incorrect_list)
@@ -443,7 +504,6 @@ def show_summary_mode(uploaded_file):
         st.info("No questions were answered in this session.")
     st.divider() 
     
-    # Detail Expander
     if st.session_state.get('show_heatmap_chunk_detail', False) and st.session_state.get('selected_heatmap_chunk_index') is not None:
         idx = st.session_state.selected_heatmap_chunk_index
         doc_chunk_details = st.session_state.get('doc_chunk_details', []) 
@@ -488,7 +548,8 @@ def show_summary_mode(uploaded_file):
             st.session_state.chunk_review_status = [0] * len(st.session_state.substantive_chunks_for_quiz)
         st.rerun()
 
-def show_ready_screen(uploaded_file):
+def show_ready_screen():
+    st.title("AI Quiz Tutor")
     st.markdown("#### Document Analyzed and ready to test your knowledge") 
     st.markdown(f"**Subject:** {st.session_state.get('current_doc_subject', CORE_SUBJECT)}")
     st.markdown(f"**Document objective:** {st.session_state.get('dynamic_doc_objective', 'To understand provided text')}")
@@ -519,9 +580,8 @@ def show_ready_screen(uploaded_file):
             st.error("Failed to generate Q1. Please try starting the quiz again.")
             st.session_state.quiz_started = False 
 
-def show_normal_quiz_mode(uploaded_file):
-    if uploaded_file: st.caption(f"Document: {uploaded_file.name}")
-
+def show_normal_quiz_mode():
+    st.title("AI Quiz Tutor")
     with st.container(border=True):
         if st.session_state.current_question_data:
             q_data = st.session_state.current_question_data
@@ -598,6 +658,7 @@ def show_normal_quiz_mode(uploaded_file):
                 st.rerun()
 
 def handle_file_upload_and_processing():
+    st.title("AI Quiz Tutor")
     uploaded_file = st.file_uploader("Upload your document", type=["docx", "pdf", "pptx", "txt"], key="file_uploader")
     st.caption("Upload of pdf files using a Mac with an Apple M-series chip (M1/M2/M3) does not work")
     
@@ -606,14 +667,12 @@ def handle_file_upload_and_processing():
             st.session_state.uploaded_file_bytes = uploaded_file.getvalue()
             st.session_state.uploaded_file_name = uploaded_file.name
         
-        st.session_state.uploaded_file_object_ref = uploaded_file
         current_file_key = f"{uploaded_file.name}_{uploaded_file.size}"
-        
         needs_full_processing = False
+        
         if st.session_state.get('uploaded_file_key') != current_file_key:
             needs_full_processing = True
-        elif (st.session_state.get('substantive_chunks_for_quiz') is None and 
-              not st.session_state.get('vector_store_setup_done', False)):
+        elif st.session_state.get('substantive_chunks_for_quiz') is None and not st.session_state.get('vector_store_setup_done', False):
             needs_full_processing = True
             
         if needs_full_processing:
@@ -637,7 +696,6 @@ def handle_file_upload_and_processing():
                     st.session_state.available_chunk_indices = list(range(len(st.session_state.substantive_chunks_for_quiz)))
                     random.shuffle(st.session_state.available_chunk_indices)
                     
-                    # FIX 1: Store a permanent backup after successful document processing
                     st.session_state._chunks_backup = st.session_state.substantive_chunks_for_quiz
                     st.session_state._details_backup = st.session_state.doc_chunk_details
                     
@@ -647,10 +705,7 @@ def handle_file_upload_and_processing():
                         st.session_state.current_doc_subject = subj
                         st.session_state.dynamic_doc_objective = obj
                         st.rerun() 
-        else:
-            pass # Using cached chunks
     else:
-        st.session_state.uploaded_file_object_ref = None
         data_privacy_explanation = "To provide quiz features, this application processes your uploaded document. Snippets of your document are sent to Google's Generative AI services to generate relevant content. Google's API policies state that this data is not used to train their general models. No original documents are stored by this application after your session ends."
         st.markdown("Data Privacy", help=data_privacy_explanation)
 
@@ -712,17 +767,11 @@ for k, v in defaults.items():
 
 
 # ==========================================================================
-# ---- EXPLICIT PAGE ROUTER (Executed exactly once per interaction) ----
+# ---- RECOVERY & EXPLICIT PAGE ROUTER ----
 # ==========================================================================
 
-# FIX 3: Debug print to track chunk presence in terminal
-print(f"Chunks present: {st.session_state.get('substantive_chunks_for_quiz') is not None}")
-
-# FIX 2: Enhanced recovery block
 if st.session_state.get('in_heatmap_quiz_mode', False):
-    # Attempt to restore chunks if missing
     if st.session_state.get('substantive_chunks_for_quiz') is None:
-        # Try backups first
         if st.session_state.get('_chunks_backup') is not None:
             st.session_state.substantive_chunks_for_quiz = st.session_state._chunks_backup
             st.session_state.doc_chunk_details = st.session_state._details_backup
@@ -730,37 +779,40 @@ if st.session_state.get('in_heatmap_quiz_mode', False):
             st.session_state.substantive_chunks_for_quiz = st.session_state.faiss_index_chunks
         elif st.session_state.get('doc_chunk_details'):
             st.session_state.substantive_chunks_for_quiz = [item['text'] for item in st.session_state.doc_chunk_details]
+        elif st.session_state.get('uploaded_file_bytes') is not None and st.session_state.get('uploaded_file_name') is not None:
+            with st.spinner("Reprocessing document to recover chunks..."):
+                docling_output = process_document_with_docling(st.session_state.uploaded_file_bytes, st.session_state.uploaded_file_name)
+                if docling_output:
+                    st.session_state.doc_chunk_details = [{"text": i['text'], "full_headings_list": i.get('headings', [])} for i in docling_output]
+                    st.session_state.substantive_chunks_for_quiz = [i['text'] for i in st.session_state.doc_chunk_details]
+                    st.session_state.chunk_hover_labels = [(' '.join(i['text'].split()[:50]) + "...") for i in st.session_state.doc_chunk_details]
+                    st.session_state.chunk_review_status = [0] * len(st.session_state.substantive_chunks_for_quiz)
+                    st.session_state.available_chunk_indices = list(range(len(st.session_state.substantive_chunks_for_quiz)))
+                    random.shuffle(st.session_state.available_chunk_indices)
+                    st.session_state._chunks_backup = st.session_state.substantive_chunks_for_quiz
+                    st.session_state._details_backup = st.session_state.doc_chunk_details
+                else:
+                    st.error("Could not recover chunks. Please re-upload.")
+                    st.session_state.in_heatmap_quiz_mode = False
+                    st.rerun()
         else:
-            st.error("Document chunks are missing. Please re-upload the document.")
+            st.error("Document data missing. Please re-upload.")
             st.session_state.in_heatmap_quiz_mode = False
-            st.rerun()   # Force a rerun to go back to home screen with error visible
-    
-    # Only proceed if we now have chunks
-    if st.session_state.get('substantive_chunks_for_quiz') is not None:
-        show_heatmap_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
-        st.stop()
-
+            st.rerun()
 
 has_chunks = st.session_state.get('substantive_chunks_for_quiz') is not None
 
-# 2. SUMMARY SCREEN
-if st.session_state.get('show_summary') and has_chunks:
-    st.title("Quiz Summary")
-    show_summary_mode(st.session_state.get('uploaded_file_object_ref'))
+if st.session_state.get('in_heatmap_quiz_mode') and has_chunks:
+    show_heatmap_quiz_mode()
     st.stop()
-
-# 3. NORMAL QUIZ
-if st.session_state.get('quiz_started') and has_chunks:
-    st.title("AI Quiz Tutor")
-    show_normal_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
+elif st.session_state.get('show_summary') and has_chunks:
+    show_summary_mode()
     st.stop()
-
-# 4. READY SCREEN (Doc uploaded, not started yet)
-if has_chunks and st.session_state.get('vector_store_setup_done'):
-    st.title("AI Quiz Tutor")
-    show_ready_screen(st.session_state.get('uploaded_file_object_ref'))
+elif st.session_state.get('quiz_started') and has_chunks:
+    show_normal_quiz_mode()
     st.stop()
-
-# 5. DEFAULT HOME SCREEN / UPLOADER
-st.title("AI Quiz Tutor")
-handle_file_upload_and_processing()
+elif has_chunks and st.session_state.get('vector_store_setup_done'):
+    show_ready_screen()
+    st.stop()
+else:
+    handle_file_upload_and_processing()
