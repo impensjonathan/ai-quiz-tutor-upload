@@ -43,6 +43,17 @@ NUM_CONTEXT_CHUNKS_TO_USE = 3      # Base number of chunks for final context
 MIN_WORDS_FOR_CONTENT_CHUNK = 4 
 NUM_CHUNKS_TO_FETCH_SEMANTICALLY = 5 # How many to initially FETCH for semantic search (for simpler or harder-fallback)
 
+# --------------------------------------------------------------------------
+# EXPLICIT PAGE ROUTER (MISSING PIECE)
+# --------------------------------------------------------------------------
+
+if "in_heatmap_quiz_mode" not in st.session_state:
+    st.session_state.in_heatmap_quiz_mode = False
+
+if st.session_state.in_heatmap_quiz_mode:
+    show_heatmap_quiz_mode()
+    st.stop()
+    
 # --- Function Definitions ---
 def setup_vector_store(substantive_chunks_list, api_key_for_ef, uploaded_filename="document"):
     if not substantive_chunks_list:
