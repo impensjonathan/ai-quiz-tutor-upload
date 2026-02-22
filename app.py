@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + EOF Byte Cache Fix)
+# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Hard Backup Recovery)
 
 import streamlit as st
 
@@ -124,7 +124,6 @@ def determine_document_theme(sampled_chunks, llm_model):
     except Exception as e:
         return CORE_SUBJECT, "To analyze the provided document." 
 
-# FIX 3: Modified to accept raw bytes to prevent EOF errors
 def process_document_with_docling(file_bytes, filename):
     if file_bytes is None: return None
     final_content_chunks = []
@@ -208,16 +207,15 @@ def display_heatmap_grid():
             
         color_info = colors_map.get(statuses[chunk_idx], colors_map[0])
 
-        def _make_cb(idx):
-            def _cb():
-                if st.session_state.chunk_review_status[idx] == 0: st.session_state.chunk_review_status[idx] = 4 
-                st.session_state.selected_heatmap_chunk_index = idx
-                st.session_state.show_heatmap_chunk_detail = True
-            return _cb
+        def _make_cb(idx=chunk_idx):
+            if st.session_state.chunk_review_status[idx] == 0: 
+                st.session_state.chunk_review_status[idx] = 4 
+            st.session_state.selected_heatmap_chunk_index = idx
+            st.session_state.show_heatmap_chunk_detail = True
 
         if cols is None: cols = st.columns(per_row); c_idx = 0
         with cols[c_idx]:
-            st.button(label=color_info['emoji'], key=f"hm_btn_{chunk_idx}", help=hover_labels[chunk_idx], on_click=_make_cb(chunk_idx))
+            st.button(label=color_info['emoji'], key=f"hm_btn_{chunk_idx}", help=hover_labels[chunk_idx], on_click=_make_cb)
         c_idx = (c_idx + 1) % per_row
         if c_idx == 0: cols = None 
 
@@ -230,7 +228,6 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
     if focused_chunk_idx is not None and (0 <= focused_chunk_idx < len(all_doc_chunks)):
         try:
             original_context_indices = [focused_chunk_idx]
-
             if faiss_index is not None:
                 query_emb = genai.embed_content(
                     model=EMBEDDING_MODEL,
@@ -244,11 +241,11 @@ def generate_quiz_question(model, subject="Document Content", difficulty="averag
                 )
 
                 for idx in faiss_indices_ret[0]:
+                    idx = int(idx)
                     if idx != focused_chunk_idx and idx not in original_context_indices and 0 <= idx < len(all_doc_chunks):
-                        original_context_indices.append(int(idx))
+                        original_context_indices.append(idx)
                     if len(original_context_indices) >= NUM_CONTEXT_CHUNKS_TO_USE:
                         break
-
         except Exception:
             original_context_indices = [focused_chunk_idx]
             
@@ -605,7 +602,6 @@ def handle_file_upload_and_processing():
     st.caption("Upload of pdf files using a Mac with an Apple M-series chip (M1/M2/M3) does not work")
     
     if uploaded_file:
-        # FIX 3: Store file bytes once directly in state so it doesn't hit EOF on reruns
         if "uploaded_file_bytes" not in st.session_state or st.session_state.get("uploaded_file_name") != uploaded_file.name:
             st.session_state.uploaded_file_bytes = uploaded_file.getvalue()
             st.session_state.uploaded_file_name = uploaded_file.name
@@ -613,7 +609,6 @@ def handle_file_upload_and_processing():
         st.session_state.uploaded_file_object_ref = uploaded_file
         current_file_key = f"{uploaded_file.name}_{uploaded_file.size}"
         
-        # FIX 1: Only reprocess if file changed OR data is missing entirely
         needs_full_processing = False
         if st.session_state.get('uploaded_file_key') != current_file_key:
             needs_full_processing = True
@@ -633,7 +628,6 @@ def handle_file_upload_and_processing():
             st.session_state.quiz_started = False
             
             with st.spinner("Processing document logic..."):
-                # Pass bytes explicitly to parser
                 docling_output = process_document_with_docling(st.session_state.uploaded_file_bytes, st.session_state.uploaded_file_name)
                 if docling_output:
                     st.session_state.doc_chunk_details = [{"text": i['text'], "full_headings_list": i.get('headings', [])} for i in docling_output]
@@ -643,6 +637,10 @@ def handle_file_upload_and_processing():
                     st.session_state.available_chunk_indices = list(range(len(st.session_state.substantive_chunks_for_quiz)))
                     random.shuffle(st.session_state.available_chunk_indices)
                     
+                    # FIX 1: Store a permanent backup after successful document processing
+                    st.session_state._chunks_backup = st.session_state.substantive_chunks_for_quiz
+                    st.session_state._details_backup = st.session_state.doc_chunk_details
+                    
                     if st.session_state.llm_configured:
                         setup_vector_store(st.session_state.substantive_chunks_for_quiz, st.session_state.gemini_api_key, uploaded_file.name)
                         subj, obj = determine_document_theme(st.session_state.substantive_chunks_for_quiz[:8], st.session_state.gemini_model)
@@ -650,7 +648,7 @@ def handle_file_upload_and_processing():
                         st.session_state.dynamic_doc_objective = obj
                         st.rerun() 
         else:
-            print(f"--- Using cached chunks for {uploaded_file.name} ---")
+            pass # Using cached chunks
     else:
         st.session_state.uploaded_file_object_ref = None
         data_privacy_explanation = "To provide quiz features, this application processes your uploaded document. Snippets of your document are sent to Google's Generative AI services to generate relevant content. Google's API policies state that this data is not used to train their general models. No original documents are stored by this application after your session ends."
@@ -703,7 +701,9 @@ defaults = {
     "faiss_index": None,
     "faiss_index_chunks": [],
     "chunk_hover_labels": [],
-    "uploaded_file_object_ref": None
+    "uploaded_file_object_ref": None,
+    "_chunks_backup": None,
+    "_details_backup": None
 }
 
 for k, v in defaults.items():
@@ -715,23 +715,33 @@ for k, v in defaults.items():
 # ---- EXPLICIT PAGE ROUTER (Executed exactly once per interaction) ----
 # ==========================================================================
 
-# FIX 2: Graceful recovery if chunks mysteriously drop out of state
+# FIX 3: Debug print to track chunk presence in terminal
+print(f"Chunks present: {st.session_state.get('substantive_chunks_for_quiz') is not None}")
+
+# FIX 2: Enhanced recovery block
 if st.session_state.get('in_heatmap_quiz_mode', False):
+    # Attempt to restore chunks if missing
     if st.session_state.get('substantive_chunks_for_quiz') is None:
-        if st.session_state.get('faiss_index_chunks'):
+        # Try backups first
+        if st.session_state.get('_chunks_backup') is not None:
+            st.session_state.substantive_chunks_for_quiz = st.session_state._chunks_backup
+            st.session_state.doc_chunk_details = st.session_state._details_backup
+        elif st.session_state.get('faiss_index_chunks'):
             st.session_state.substantive_chunks_for_quiz = st.session_state.faiss_index_chunks
         elif st.session_state.get('doc_chunk_details'):
             st.session_state.substantive_chunks_for_quiz = [item['text'] for item in st.session_state.doc_chunk_details]
         else:
             st.error("Document chunks are missing. Please re-upload the document.")
             st.session_state.in_heatmap_quiz_mode = False
+            st.rerun()   # Force a rerun to go back to home screen with error visible
+    
+    # Only proceed if we now have chunks
+    if st.session_state.get('substantive_chunks_for_quiz') is not None:
+        show_heatmap_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
+        st.stop()
+
 
 has_chunks = st.session_state.get('substantive_chunks_for_quiz') is not None
-
-# 1. HEATMAP FOCUSED QUIZ
-if st.session_state.get('in_heatmap_quiz_mode') and has_chunks:
-    show_heatmap_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
-    st.stop()
 
 # 2. SUMMARY SCREEN
 if st.session_state.get('show_summary') and has_chunks:
