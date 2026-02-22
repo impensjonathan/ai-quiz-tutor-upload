@@ -774,7 +774,8 @@ else:
     uploaded_file = st.session_state.get('uploaded_file_object_ref', None)
 
 # --- Document Processing ---
-if uploaded_file is not None and not st.session_state.get('in_heatmap_quiz_mode', False): 
+is_home_screen = not st.session_state.get('show_summary', False) and not st.session_state.get('quiz_started', False) and not st.session_state.get('in_heatmap_quiz_mode', False) 
+if uploaded_file is not None and is_home_screen: 
     current_file_key = f"{uploaded_file.name}_{uploaded_file.size}"
     needs_full_processing = False
     if st.session_state.get('uploaded_file_key') != current_file_key:
