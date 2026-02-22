@@ -1,4 +1,4 @@
-# app.py (AI_Quiz_Tutor_Upload version - Page Router Architecture)
+# app.py (AI_Quiz_Tutor_Upload version - Final Architecture + Safe State)
 
 import streamlit as st
 
@@ -620,7 +620,7 @@ def handle_file_upload_and_processing():
                         subj, obj = determine_document_theme(st.session_state.substantive_chunks_for_quiz[:8], st.session_state.gemini_model)
                         st.session_state.current_doc_subject = subj
                         st.session_state.dynamic_doc_objective = obj
-                        st.rerun() # Document processed, trigger router to show ready screen
+                        st.rerun() 
     else:
         st.session_state.uploaded_file_object_ref = None
         data_privacy_explanation = "To provide quiz features, this application processes your uploaded document. Snippets of your document are sent to Google's Generative AI services to generate relevant content. Google's API policies state that this data is not used to train their general models. No original documents are stored by this application after your session ends."
@@ -641,12 +641,42 @@ try:
 except Exception as e: 
     st.error(f"AI Config Error. Check API key setup in secrets: {e}") 
 
-st.session_state.setdefault('uploaded_file_key', None) 
-st.session_state.setdefault('substantive_chunks_for_quiz', None) 
-st.session_state.setdefault('vector_store_setup_done', False) 
-st.session_state.setdefault('in_heatmap_quiz_mode', False) 
-st.session_state.setdefault('show_summary', False) 
-st.session_state.setdefault('quiz_started', False)
+# --------------------------------------------------------------------------
+# SAFE SESSION STATE INITIALIZATION (The Missing Key Fix)
+# --------------------------------------------------------------------------
+defaults = {
+    "uploaded_file_key": None,
+    "substantive_chunks_for_quiz": None,
+    "vector_store_setup_done": False,
+    "in_heatmap_quiz_mode": False,
+    "show_summary": False,
+    "quiz_started": False,
+    "total_questions_answered": 0,
+    "incorrectly_answered_questions": [],
+    "current_question_data": None,
+    "current_question_context_indices": [],
+    "heatmap_quiz_current_context_indices": [],
+    "heatmap_quiz_last_answer_incorrect": False,
+    "user_answer": None,
+    "show_explanation": False,
+    "feedback_message": None,
+    "last_answer_correct": None,
+    "chunk_review_status": [],
+    "available_chunk_indices": [],
+    "selected_heatmap_chunk_index": None,
+    "show_heatmap_chunk_detail": False,
+    "heatmap_quiz_source_chunk_idx": None,
+    "current_doc_subject": CORE_SUBJECT,
+    "dynamic_doc_objective": "To understand provided text.",
+    "faiss_index": None,
+    "faiss_index_chunks": [],
+    "chunk_hover_labels": [],
+    "uploaded_file_object_ref": None
+}
+
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 
 # ==========================================================================
@@ -654,26 +684,26 @@ st.session_state.setdefault('quiz_started', False)
 # ==========================================================================
 
 # 1. HEATMAP FOCUSED QUIZ
-if st.session_state.get('in_heatmap_quiz_mode') and st.session_state.get('substantive_chunks_for_quiz'):
-    show_heatmap_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
+if st.session_state.in_heatmap_quiz_mode and st.session_state.substantive_chunks_for_quiz:
+    show_heatmap_quiz_mode(st.session_state.uploaded_file_object_ref)
     st.stop()
 
 # 2. SUMMARY SCREEN
-if st.session_state.get('show_summary') and st.session_state.get('substantive_chunks_for_quiz'):
+if st.session_state.show_summary and st.session_state.substantive_chunks_for_quiz:
     st.title("Quiz Summary")
-    show_summary_mode(st.session_state.get('uploaded_file_object_ref'))
+    show_summary_mode(st.session_state.uploaded_file_object_ref)
     st.stop()
 
 # 3. NORMAL QUIZ
-if st.session_state.get('quiz_started') and st.session_state.get('substantive_chunks_for_quiz'):
+if st.session_state.quiz_started and st.session_state.substantive_chunks_for_quiz:
     st.title("AI Quiz Tutor")
-    show_normal_quiz_mode(st.session_state.get('uploaded_file_object_ref'))
+    show_normal_quiz_mode(st.session_state.uploaded_file_object_ref)
     st.stop()
 
 # 4. READY SCREEN (Doc uploaded, not started yet)
-if st.session_state.get('substantive_chunks_for_quiz') and st.session_state.get('vector_store_setup_done'):
+if st.session_state.substantive_chunks_for_quiz and st.session_state.vector_store_setup_done:
     st.title("AI Quiz Tutor")
-    show_ready_screen(st.session_state.get('uploaded_file_object_ref'))
+    show_ready_screen(st.session_state.uploaded_file_object_ref)
     st.stop()
 
 # 5. DEFAULT HOME SCREEN / UPLOADER
